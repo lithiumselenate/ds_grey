@@ -1,50 +1,58 @@
 /**
- * Asterion HX-9 — deterministic state machine + animation.
+ * animation.js — deterministic state machine and frame-rate independent
+ * mechanism animation for the Asterion HX-9.
  *
- * One authoritative scalar set describes the aircraft configuration. Every
- * frame the scalars ease toward state targets (frame-rate independent), the
- * constraint layer forbids impossible combinations, and transforms are then
- * written absolutely — so pausing, re-targeting mid-transition or returning
- * the explode slider to zero never accumulates drift.
+ * One authored table defines every legal configuration. Continuous values
+ * chase their targets with eased, rate-limited motion, so selecting a new
+ * state mid-transition is always valid: nothing is scripted as a timeline.
  */
+
 import * as THREE from 'three';
 
+const HALF_PI = Math.PI / 2;
+const DEG = Math.PI / 180;
+const RPM_MAX = 332;                      // rotor design speed, rev/min
+const RPM_RADS = (RPM_MAX * Math.PI * 2) / 60;
+
 export const STATE_NAMES = ['ground', 'hover', 'transition', 'cruise', 'rescue', 'maintenance'];
-export const RPM_MAX = 342;
-const CABLE_STOW = 0.28;
-const CABLE_MAX = 6.4;
 
-const STATE_TARGETS = {
-  ground: { tilt: 1, rpm: 0.07, gear: 1, sponson: 1, door: 0, arm: 0, panels: 0, cabin: 0.25, nav: 1, scan: 0 },
-  hover: { tilt: 1, rpm: 1, gear: 1, sponson: 1, door: 0, arm: 0, panels: 0, cabin: 0.35, nav: 1, scan: 1 },
-  transition: { tilt: 0.5, rpm: 1, gear: 0, sponson: 0, door: 0, arm: 0, panels: 0, cabin: 0.35, nav: 1, scan: 1 },
-  cruise: { tilt: 0, rpm: 0.94, gear: 0, sponson: 0, door: 0, arm: 0, panels: 0, cabin: 0.3, nav: 1, scan: 1 },
-  rescue: { tilt: 1, rpm: 0.9, gear: 1, sponson: 1, door: 1, arm: 1, panels: 0, cabin: 1, nav: 1, scan: 1 },
-  maintenance: { tilt: 1, rpm: 0, gear: 1, sponson: 1, door: 1, arm: 0, panels: 1, cabin: 0.8, nav: 0, scan: 0 }
+/**
+ * tilt      0 = proprotors vertical, 1 = fully forward
+ * rpm       normalised rotor speed
+ * gear      1 = down and locked
+ * sponson   1 = extended for water operations
+ * door      1 = rescue door fully open
+ * winch     1 = hoist boom slewed outboard
+ * panels    1 = service covers open
+ * powered   1 = avionics and lighting live
+ */
+export const STATES = {
+  ground: { tilt: 0.0, rpm: 0.0, gear: 1, sponson: 1, door: 0, winch: 0, panels: 0, powered: 1, explodeAllowed: false },
+  hover: { tilt: 0.0, rpm: 1.0, gear: 1, sponson: 1, door: 0, winch: 0, panels: 0, powered: 1, explodeAllowed: false },
+  transition: { tilt: 0.5, rpm: 1.0, gear: 0, sponson: 0.5, door: 0, winch: 0, panels: 0, powered: 1, explodeAllowed: false },
+  cruise: { tilt: 1.0, rpm: 0.94, gear: 0, sponson: 0, door: 0, winch: 0, panels: 0, powered: 1, explodeAllowed: false },
+  rescue: { tilt: 0.0, rpm: 0.9, gear: 1, sponson: 1, door: 1, winch: 1, panels: 0, powered: 1, explodeAllowed: false },
+  maintenance: { tilt: 0.14, rpm: 0.0, gear: 1, sponson: 1, door: 1, winch: 0, panels: 1, powered: 0, explodeAllowed: true }
 };
 
+/* mechanism rate limits, units per second */
 const RATE = {
-  tilt: { k: 1.6, max: 0.26 },
-  rpm: { k: 1.1, max: 0.2 },
-  gear: { k: 2.0, max: 0.32 },
-  gearDoor: { k: 3.0, max: 0.7 },
-  sponson: { k: 2.0, max: 0.34 },
-  door: { k: 2.6, max: 0.55 },
-  arm: { k: 2.4, max: 0.5 },
-  panels: { k: 2.2, max: 0.5 },
-  cabin: { k: 3.0, max: 1.6 },
-  nav: { k: 6.0, max: 4.0 },
-  explode: { k: 3.2, max: 0.9 },
-  cable: { k: 3.0, max: 1.1 }
+  tilt: 0.19, gear: 0.3, gearDoor: 0.55, sponson: 0.32, door: 0.55,
+  winch: 0.5, panels: 0.4, cable: 0.55, explode: 0.85, rpmUp: 0.24, rpmDown: 0.18, light: 1.6
 };
 
-function ease(v, target, r, dt) {
-  const d = target - v;
-  if (Math.abs(d) < 1e-5) return target;
-  let step = d * (1 - Math.exp(-r.k * dt));
-  const lim = r.max * dt;
-  if (Math.abs(step) > lim) step = Math.sign(step) * lim;
-  return v + step;
+export const CABLE_MAX = 1.4;   // clamped so the basket clears the hangar deck
+
+/** Eased, rate-limited approach with an exact terminal snap (no drift). */
+function approach(cur, tgt, rate, dt) {
+  const d = tgt - cur;
+  const ad = Math.abs(d);
+  if (ad < 1e-5) return tgt;
+  const max = rate * dt;
+  let step = d * (1 - Math.exp(-5.5 * dt));
+  if (Math.abs(step) > max) step = Math.sign(d) * max;
+  if (ad <= Math.abs(step) + 1e-5) return tgt;
+  return cur + step;
 }
 
 const smoothstep = (a, b, x) => {
@@ -52,359 +60,317 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 
-export function createAnimator(vehicle, mats) {
-  const P = vehicle.parts;
-  const get = (n) => P[n];
+export class Animator {
+  constructor(assets, refs, explodeGroups, hotspots) {
+    this.A = assets;
+    this.refs = refs;
+    this.explodeGroups = explodeGroups;
+    this.hotspots = hotspots;
+    this.time = 0;
+    this.state = 'ground';
+    this.reducedMotion = false;
+    this.autoScan = true;
+    this.sensorAz = 0;
+    this.sensorEl = -8;
+    this.rotorAngle = 0;
+    this.cableRequest = 0;
 
-  const s = {
-    tilt: 1, rpm: 0.07, gear: 1, gearDoor: 1, sponson: 1, door: 0, arm: 0,
-    panels: 0, cabin: 0.25, nav: 1, explode: 0, cable: CABLE_STOW
-  };
-  const initial = Object.assign({}, s);
+    this.v = {
+      tilt: 0, rpm: 0, gear: 1, gearDoor: 1, sponson: 1, door: 0,
+      winch: 0, panels: 0, cable: 0, explode: 0, cabin: 0.45, avionics: 0.6
+    };
+    this.explodeRequest = 0;
 
-  const ctl = {
-    state: 'ground',
-    requested: 'ground',
-    explodeTarget: 0,
-    cableTarget: CABLE_STOW,
-    cableCommand: 0,
-    scanning: true,
-    turretManual: false,
-    turretYaw: 0,
-    turretPitch: 0.1,
-    reducedMotion: false,
-    boomOverride: null,
-    clock: 0,
-    rotorAngle: 0,
-    drumAngle: 0,
-    transitioning: false
-  };
-
-  // authored explode vectors resolved to live objects
-  const explodeItems = vehicle.explodeSpec
-    .map((spec) => {
-      const obj = get(spec.name);
-      if (!obj) return null;
-      return { obj, vec: new THREE.Vector3(spec.vec[0], spec.vec[1], spec.vec[2]), base: obj.position.clone() };
-    })
-    .filter(Boolean);
-  const dynamicBase = new Map();
-
-  const gearLegs = vehicle.names.gear.map(get).filter(Boolean);
-  const gearDoors = vehicle.names.gearDoors.map(get).filter(Boolean);
-  const nacelles = vehicle.names.nacelles.map(get).filter(Boolean);
-  const rotors = vehicle.names.rotors.map(get).filter(Boolean);
-  const sponsonObjs = vehicle.names.sponsons.map(get).filter(Boolean);
-  const panelObjs = vehicle.names.panels.map(get).filter(Boolean);
-  const discs = ['rotor.port.disc', 'rotor.stbd.disc'].map(get).filter(Boolean);
-  const doorObj = get('cabin.door');
-  const doorBase = doorObj ? doorObj.position.clone() : new THREE.Vector3();
-  const armObj = get('winch.arm');
-  const cableObj = get('winch.cable');
-  const hookObj = get('winch.hookGroup');
-  const drumObj = get('winch.drum');
-  const yawObj = get('turret.yaw');
-  const pitchObj = get('turret.pitch');
-
-  const sideOf = (obj) => (obj.name.endsWith('stbd') ? 1 : -1);
-
-  function targets() {
-    const t = Object.assign({}, STATE_TARGETS[ctl.state]);
-    // ---- constraint layer ----
-    if (ctl.state !== 'maintenance') ctl.explodeTarget = 0;
-    ctl.explodeTarget = Math.min(1, Math.max(0, ctl.explodeTarget));
-    if (ctl.boomOverride !== null && ctl.state === 'rescue') t.arm = ctl.boomOverride ? 1 : 0;
-    // exploded or powered-down airframe never turns rotors
-    if (s.explode > 0.005 || ctl.explodeTarget > 0.005 || ctl.state === 'maintenance') t.rpm = 0;
-    // hoist may only run through an open door with the boom out
-    const cableOut = s.cable > CABLE_STOW + 0.02;
-    if (cableOut) {
-      t.door = Math.max(t.door, 1);
-      t.arm = Math.max(t.arm, 1);
+    /* dedicated light materials so blink groups never share intensity */
+    this._ownMaterials = [];
+    for (const b of refs.beacons) {
+      b.material = b.material.clone();
+      this._ownMaterials.push(b.material);
+      assets.materials.push(b.material);
     }
-    return t;
+    for (const n of refs.navLights) {
+      n.material = n.material.clone();
+      this._ownMaterials.push(n.material);
+      assets.materials.push(n.material);
+    }
+
+    this.applyImmediate('ground');
   }
 
-  function applyTransforms() {
-    // nacelle tilt: 1 = vertical (helicopter), 0 = forward (aeroplane)
-    const tiltAngle = -(1 - s.tilt) * (Math.PI / 2);
-    for (const n of nacelles) n.rotation.z = tiltAngle;
+  /* ------------------------------------------------------------ */
 
-    // rotors
-    for (const r of rotors) r.rotation.y = ctl.rotorAngle * (sideOf(r) > 0 ? 1 : -1);
-    const blur = smoothstep(0.42, 0.86, s.rpm);
-    mats.blade.opacity = 1 - 0.72 * blur;
-    mats.disc.opacity = 0.62 * blur;
-    for (const d of discs) d.visible = mats.disc.opacity > 0.02;
-
-    // landing gear + doors
-    for (const leg of gearLegs) {
-      const r = leg.userData.retract;
-      const a = (1 - s.gear) * r.angle;
-      leg.rotation.set(0, 0, 0);
-      if (r.axis === 'x') leg.rotation.x = a;
-      else leg.rotation.z = a;
-    }
-    for (const d of gearDoors) d.rotation.x = (d.userData.hinge || 1) * s.gearDoor * 1.55;
-
-    // water sponsons fold up against the hull sides
-    for (const sp of sponsonObjs) sp.rotation.x = -(1 - s.sponson) * sideOf(sp) * 1.18;
-
-    // sliding rescue door
-    if (doorObj) {
-      doorObj.position.set(doorBase.x - 1.2 * s.door, doorBase.y, doorBase.z + 0.05 * s.door);
-      dynamicBase.set(doorObj, doorObj.position.clone());
-    }
-
-    // maintenance panels
-    for (const p of panelObjs) p.rotation.z = s.panels * 1.25;
-
-    // winch
-    if (armObj) armObj.rotation.x = -(1 - s.arm) * 1.16;
-    if (cableObj) cableObj.scale.set(1, s.cable, 1);
-    if (hookObj) hookObj.position.y = -s.cable;
-    if (drumObj) drumObj.rotation.y = ctl.drumAngle;
-
-    // sensor turret
-    if (yawObj) yawObj.rotation.y = ctl.turretYaw;
-    if (pitchObj) pitchObj.rotation.z = ctl.turretPitch;
-
-    // ---- exploded view (authored vectors, absolute writes) ----
-    const e = s.explode;
-    for (const item of explodeItems) {
-      const base = dynamicBase.get(item.obj) || item.base;
-      item.obj.position.set(base.x + item.vec.x * e, base.y + item.vec.y * e, base.z + item.vec.z * e);
-    }
-  }
-
-  function applyLights(dt) {
-    const c = ctl.clock;
-    mats.emCabin.emissiveIntensity = 0.12 + 1.5 * s.cabin;
-    mats.emPanel.emissiveIntensity = 0.15 + 1.4 * s.cabin;
-    vehicle.lights.cabin.intensity = 5.5 * s.cabin * (s.door > 0.2 ? 1.15 : 1);
-    vehicle.lights.cockpit.intensity = 2.2 * s.cabin;
-    mats.emExhaust.emissiveIntensity = 0.04 + 0.85 * s.rpm;
-    mats.emCyan.emissiveIntensity = 0.4 + 1.4 * (0.6 + 0.4 * Math.sin(c * 2.1));
-    mats.emStatus.emissiveIntensity = 0.5 + 0.8 * (0.5 + 0.5 * Math.sin(c * 1.3 + 1.1));
-
-    const navOn = s.nav;
-    mats.emGreen.emissiveIntensity = 2.4 * navOn;
-    mats.emRed.emissiveIntensity = 2.4 * navOn;
-    // double-pulse tail strobe
-    const ph = c % 1.7;
-    const strobe = ph < 0.07 || (ph > 0.19 && ph < 0.26) ? 1 : 0;
-    mats.emStrobe.emissiveIntensity = navOn * (0.05 + 7 * strobe);
-    // slower anti-collision beacon, deliberately out of phase
-    const bph = (c * 0.85) % 1;
-    mats.emBeacon.emissiveIntensity = navOn * (0.1 + 5.5 * Math.pow(Math.max(0, Math.sin(bph * Math.PI)), 6));
-  }
-
-  function applyVibration() {
-    const f = vehicle.frame;
-    const active = !ctl.reducedMotion && s.rpm > 0.06 && ctl.state !== 'maintenance' && s.explode < 0.01;
-    if (!active) {
-      f.position.set(0, 0, 0);
-      f.rotation.set(0, 0, 0);
-      return;
-    }
-    const c = ctl.clock;
-    const a = s.rpm;
-    f.position.set(
-      Math.sin(c * 21.7) * 0.0016 * a,
-      (Math.sin(c * 31.3) * 0.0032 + Math.sin(c * 17.1) * 0.0018) * a,
-      Math.sin(c * 26.9) * 0.0014 * a
-    );
-    f.rotation.set(Math.sin(c * 13.3) * 0.0009 * a, Math.sin(c * 9.7) * 0.0007 * a, Math.sin(c * 23.1) * 0.0013 * a);
-  }
-
-  function update(dt) {
-    ctl.clock += dt;
-    const t = targets();
-
-    s.tilt = ease(s.tilt, t.tilt, RATE.tilt, dt);
-    s.rpm = ease(s.rpm, t.rpm, RATE.rpm, dt);
-    s.sponson = ease(s.sponson, t.sponson, RATE.sponson, dt);
-    s.door = ease(s.door, t.door, RATE.door, dt);
-    s.arm = ease(s.arm, t.arm, RATE.arm, dt);
-    s.panels = ease(s.panels, t.panels, RATE.panels, dt);
-    s.cabin = ease(s.cabin, t.cabin, RATE.cabin, dt);
-    s.nav = ease(s.nav, t.nav, RATE.nav, dt);
-    s.explode = ease(s.explode, ctl.explodeTarget, RATE.explode, dt);
-
-    // gear / gear-door sequencing
-    let doorTarget;
-    if (t.gear > 0.5) {
-      doorTarget = 1;
-      if (s.gearDoor > 0.9) s.gear = ease(s.gear, 1, RATE.gear, dt);
-    } else {
-      s.gear = ease(s.gear, 0, RATE.gear, dt);
-      doorTarget = s.gear < 0.03 ? 0 : 1;
-    }
-    s.gearDoor = ease(s.gearDoor, doorTarget, RATE.gearDoor, dt);
-
-    // hoist cable: only extends through an open door with the boom deployed
-    const hoistReady = ctl.state === 'rescue' && s.door > 0.9 && s.arm > 0.85;
-    if (!hoistReady) ctl.cableTarget = CABLE_STOW;
-    else if (ctl.cableCommand !== 0) {
-      ctl.cableTarget = Math.min(CABLE_MAX, Math.max(CABLE_STOW, ctl.cableTarget + ctl.cableCommand * 2.2 * dt));
-    }
-    const prevCable = s.cable;
-    s.cable = ease(s.cable, ctl.cableTarget, RATE.cable, dt);
-    ctl.drumAngle += ((s.cable - prevCable) / 0.075) * -1;
-
-    // rotor rotation
-    const omega = (s.rpm * RPM_MAX * Math.PI * 2) / 60;
-    ctl.rotorAngle = (ctl.rotorAngle + omega * dt) % (Math.PI * 2);
-
-    // turret scan / manual pointing
-    const powered = ctl.state !== 'maintenance';
-    if (powered && ctl.scanning && !ctl.turretManual) {
-      const w = ctl.reducedMotion ? 0.12 : 0.32;
-      ctl.turretYaw = Math.sin(ctl.clock * w) * 0.95;
-      ctl.turretPitch = 0.12 + Math.sin(ctl.clock * w * 1.7) * 0.1;
-    }
-
-    applyTransforms();
-    applyLights(dt);
-    applyVibration();
-
-    const diffs = [
-      Math.abs(s.tilt - t.tilt), Math.abs(s.rpm - t.rpm), Math.abs(s.gear - t.gear),
-      Math.abs(s.sponson - t.sponson), Math.abs(s.door - t.door), Math.abs(s.arm - t.arm),
-      Math.abs(s.panels - t.panels), Math.abs(s.gearDoor - doorTarget), Math.abs(s.explode - ctl.explodeTarget)
-    ];
-    ctl.transitioning = diffs.some((d) => d > 0.012);
-  }
-
-  function requestState(name) {
-    if (!STATE_NAMES.includes(name)) return false;
-    ctl.state = name;
-    ctl.requested = name;
-    ctl.boomOverride = null;
-    if (name !== 'maintenance') ctl.explodeTarget = 0;
-    if (name !== 'rescue') ctl.cableTarget = CABLE_STOW;
+  setState(name) {
+    if (!STATES[name]) return false;
+    this.state = name;
+    if (name !== 'maintenance') this.explodeRequest = 0;
+    if (name !== 'rescue') this.cableRequest = 0;
     return true;
   }
 
-  function setExplode(v) {
-    const num = Number(v);
-    if (!Number.isFinite(num)) return false;
-    if (ctl.state !== 'maintenance') return false;
-    ctl.explodeTarget = Math.min(1, Math.max(0, num));
-    return true;
+  setExplodeRequest(value) {
+    const v = Math.min(1, Math.max(0, Number(value) || 0));
+    this.explodeRequest = this.explodeAllowed() ? v : 0;
+    return this.explodeRequest;
   }
 
-  function reset() {
-    Object.assign(s, initial);
-    ctl.state = 'ground';
-    ctl.requested = 'ground';
-    ctl.explodeTarget = 0;
-    ctl.cableTarget = CABLE_STOW;
-    ctl.cableCommand = 0;
-    ctl.boomOverride = null;
-    ctl.scanning = true;
-    ctl.turretManual = false;
-    ctl.turretYaw = 0;
-    ctl.turretPitch = 0.1;
-    ctl.clock = 0;
-    ctl.rotorAngle = 0;
-    ctl.drumAngle = 0;
-    ctl.transitioning = false;
-    applyTransforms();
-    applyLights(0);
-    applyVibration();
+  setCableRequest(metres) {
+    const m = Math.min(CABLE_MAX, Math.max(0, Number(metres) || 0));
+    this.cableRequest = this.hoistAllowed() ? m : 0;
+    return this.cableRequest;
   }
 
-  function snapshot() {
+  explodeAllowed() {
+    return STATES[this.state].explodeAllowed && this.v.rpm < 0.02;
+  }
+
+  hoistAllowed() {
+    return this.state === 'rescue' && this.v.door > 0.9 && this.v.winch > 0.75;
+  }
+
+  targets() {
+    return STATES[this.state];
+  }
+
+  isMoving() {
+    const t = this.targets();
+    const v = this.v;
+    const gearDoorTarget = (t.gear > 0.02 || v.gear > 0.02) ? 1 : 0;
+    return Math.abs(v.tilt - t.tilt) > 0.004 || Math.abs(v.rpm - t.rpm) > 0.01 ||
+      Math.abs(v.gear - t.gear) > 0.004 || Math.abs(v.gearDoor - gearDoorTarget) > 0.004 ||
+      Math.abs(v.sponson - t.sponson) > 0.004 || Math.abs(v.door - t.door) > 0.004 ||
+      Math.abs(v.winch - t.winch) > 0.004 || Math.abs(v.panels - t.panels) > 0.004 ||
+      Math.abs(v.cable - this.cableRequest) > 0.01 ||
+      Math.abs(v.explode - (this.explodeAllowed() ? this.explodeRequest : 0)) > 0.004;
+  }
+
+  /** Snap every mechanism to a state — used by reset(). */
+  applyImmediate(name) {
+    if (STATES[name]) this.state = name;
+    const t = this.targets();
+    const v = this.v;
+    v.tilt = t.tilt; v.rpm = t.rpm; v.gear = t.gear; v.sponson = t.sponson;
+    v.door = t.door; v.winch = t.winch; v.panels = t.panels;
+    v.gearDoor = t.gear > 0.02 ? 1 : 0;
+    v.cable = 0; v.explode = 0;
+    v.cabin = t.powered ? 0.45 : 0.0;
+    v.avionics = t.powered ? 0.6 : 0.0;
+    this.explodeRequest = 0;
+    this.cableRequest = 0;
+    this.rotorAngle = 0;
+    this.time = 0;
+    this.sensorAz = 0;
+    this.sensorEl = -8;
+    this.autoScan = true;
+    this.update(0);
+  }
+
+  /* ------------------------------------------------------------ */
+
+  update(dtRaw) {
+    const dt = Math.min(0.05, Math.max(0, dtRaw));
+    this.time += dt;
+    const t = this.targets();
+    const v = this.v;
+    const rpmCap = this.reducedMotion ? 0.3 : 1.0;
+
+    /* --- interlocks resolved before any motion --- */
+    const gearDoorTarget = (t.gear > 0.001 || v.gear > 0.001) ? 1 : 0;
+    const explodeTarget = this.explodeAllowed() ? this.explodeRequest : 0;
+    const cableTarget = this.hoistAllowed() ? this.cableRequest : 0;
+    const rpmTarget = (this.v.explode > 0.005 || explodeTarget > 0) ? 0 : Math.min(t.rpm, rpmCap);
+
+    v.gearDoor = approach(v.gearDoor, gearDoorTarget, RATE.gearDoor, dt);
+    /* bay doors lead the legs out; only the last millimetres of the tuck may
+       finish while the doors are already swinging shut */
+    if (v.gearDoor > 0.92 || (t.gear < 0.02 && v.gear < 0.03)) {
+      v.gear = approach(v.gear, t.gear, RATE.gear, dt);
+    }
+    v.tilt = approach(v.tilt, t.tilt, RATE.tilt, dt);
+    v.sponson = approach(v.sponson, t.sponson, RATE.sponson, dt);
+    /* the door cannot close and the boom cannot stow over a lowered basket */
+    const cableOut = v.cable > 0.02 || cableTarget > 0.02;
+    v.door = approach(v.door, cableOut ? Math.max(t.door, 0.98) : t.door, RATE.door, dt);
+    v.winch = approach(v.winch, cableOut ? Math.max(t.winch, 0.98) : t.winch, RATE.winch, dt);
+    v.panels = approach(v.panels, t.panels, RATE.panels, dt);
+    v.cable = approach(v.cable, cableTarget, RATE.cable, dt);
+    v.explode = approach(v.explode, explodeTarget, RATE.explode, dt);
+    v.rpm = approach(v.rpm, rpmTarget, rpmTarget > v.rpm ? RATE.rpmUp : RATE.rpmDown, dt);
+    v.cabin = approach(v.cabin, t.powered ? (this.state === 'rescue' ? 0.85 : 0.45) : 0, RATE.light, dt);
+    v.avionics = approach(v.avionics, t.powered ? 0.7 : 0, RATE.light, dt);
+
+    this._applyMechanisms(dt);
+    this._applyLights();
+    this._applyExplode(v.explode);
+  }
+
+  _applyMechanisms(dt) {
+    const v = this.v;
+    const refs = this.refs;
+
+    /* nacelle tilt + visible actuator travel */
+    for (const n of refs.nacelles) {
+      n.pivot.rotation.z = -v.tilt * HALF_PI;
+      const ext = 0.55 + v.tilt * 0.55;
+      n.rod.scale.y = ext;
+      n.rod.position.x = ext * 0.5;
+    }
+
+    /* rotor speed, direction, blade/disc treatment */
+    this.rotorAngle += v.rpm * RPM_RADS * dt;
+    if (this.rotorAngle > Math.PI * 2) this.rotorAngle -= Math.PI * 2;
+    const discOpacity = smoothstep(0.18, 0.62, v.rpm) * 0.9;
+    for (const n of refs.nacelles) {
+      n.spin.rotation.y = this.rotorAngle * (n.side > 0 ? 1 : -1);
+      const bladesVisible = v.rpm < 0.5;
+      n.blades.visible = bladesVisible;
+      n.cuffs.visible = true;
+      n.disc.visible = v.rpm > 0.06;
+      n.disc.material.opacity = discOpacity;
+    }
+
+    /* gear legs and bay doors */
+    for (const g of refs.gear) {
+      g.pivot.rotation[g.axis] = (1 - v.gear) * g.retractAngle;
+      g.doorHinge.rotation.x = v.gearDoor * g.doorAngle;
+    }
+
+    /* sponsons tuck up and inboard */
+    for (const s of refs.sponsons) {
+      s.pivot.rotation.x = (1 - v.sponson) * s.side * 0.95;
+      s.pivot.position.y = -0.28 + (1 - v.sponson) * 0.1;
+    }
+
+    /* sliding rescue door */
+    refs.doorSlider.position.x = -1.06 * v.door;
+    refs.doorSlider.position.z = 0.13 * v.door;
+
+    /* winch boom, drum, cable, hook and basket */
+    refs.winchArm.rotation.y = -HALF_PI * (1 - v.winch);
+    refs.winchDrum.rotation.x = -v.cable * 6.5;
+    const len = Math.max(0.02, v.cable);
+    refs.winchCable.scale.y = len;
+    refs.winchCable.position.y = -len / 2;
+    refs.winchLoad.position.y = -len;
+    const sway = this.reducedMotion ? 0 : Math.sin(this.time * 0.9) * 0.012 * v.cable;
+    refs.winchLoad.rotation.z = sway;
+    refs.winchLoad.rotation.y = Math.sin(this.time * 0.35) * 0.25 * (v.cable > 0.05 ? 1 : 0);
+
+    /* service covers */
+    for (const p of refs.panels) {
+      const a = v.panels * p.open;
+      if (p.axis === 'z') p.hinge.rotation.x = a * p.sign;
+      else p.hinge.rotation.z = a;
+    }
+
+    /* sensor turret: scan or manual pointing */
+    if (this.autoScan && this.targets().powered) {
+      const s = this.reducedMotion ? 0.15 : 0.42;
+      this.sensorAz = Math.sin(this.time * s) * 62;
+      this.sensorEl = -12 + Math.sin(this.time * s * 1.9) * 7;
+    }
+    refs.turretYaw.rotation.y = this.sensorAz * DEG;
+    refs.turretPitch.rotation.z = this.sensorEl * DEG;
+
+    /* idle vibration only when the rotors are actually turning */
+    const amp = (this.reducedMotion ? 0 : 1) * Math.max(0, (v.rpm - 0.18) / 0.82);
+    const tt = this.time;
+    refs.vibration.position.y = Math.sin(tt * 58.0) * 0.0017 * amp + Math.sin(tt * 37.3) * 0.0011 * amp;
+    refs.vibration.position.x = Math.sin(tt * 41.7) * 0.0009 * amp;
+    refs.vibration.rotation.z = Math.sin(tt * 44.1) * 0.0008 * amp;
+    refs.vibration.rotation.x = Math.sin(tt * 27.5) * 0.0006 * amp;
+  }
+
+  _applyLights() {
+    const v = this.v;
+    const M = this.A.mats;
+    const powered = this.targets().powered === 1;
+
+    M.emCabin.emissiveIntensity = v.cabin * 1.4;
+    M.emPanel.emissiveIntensity = v.avionics * 1.1;
+    M.emExhaust.emissiveIntensity = v.rpm * 0.75;
+
+    /* navigation lights: steady while powered, port red / starboard green */
+    for (const n of this.refs.navLights) n.material.emissiveIntensity = powered ? 1.6 : 0.05;
+
+    /* anti-collision: two independent flash periods, deterministic in sim time */
+    const t = this.time;
+    const upper = ((t * 0.85) % 1) < 0.1 ? 3.4 : 0.06;
+    const lower = ((t * 0.85 + 0.5) % 1) < 0.07 ? 2.6 : 0.05;
+    this.refs.beacons.forEach((b, i) => {
+      b.material.emissiveIntensity = powered ? (i === 0 ? upper : lower) : 0.02;
+    });
+    for (const l of this.refs.statusLeds) l.visible = powered;
+    if (this.refs.landingLight) {
+      this.refs.landingLight.material.emissiveIntensity =
+        powered && (this.state === 'rescue' || this.state === 'hover') ? 2.2 : 0.04;
+    }
+  }
+
+  _applyExplode(value) {
+    for (const g of this.explodeGroups) {
+      if (value <= 0) {
+        g.obj.position.copy(g.base);
+      } else {
+        g.obj.position.set(
+          g.base.x + g.dir.x * g.dist * value,
+          g.base.y + g.dir.y * g.dist * value,
+          g.base.z + g.dir.z * g.dist * value
+        );
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------ */
+
+  snapshot() {
+    const v = this.v;
     return {
-      state: ctl.state,
-      transitioning: ctl.transitioning,
-      nacelleAngleDeg: +(s.tilt * 90).toFixed(1),
-      rotorRpm: +(s.rpm * RPM_MAX).toFixed(0),
-      rotorBlur: +smoothstep(0.42, 0.86, s.rpm).toFixed(2),
-      gear: +s.gear.toFixed(3),
-      gearDoors: +s.gearDoor.toFixed(3),
-      sponsons: +s.sponson.toFixed(3),
-      rescueDoor: +s.door.toFixed(3),
-      winchBoom: +s.arm.toFixed(3),
-      cableLengthM: +s.cable.toFixed(2),
-      explode: +s.explode.toFixed(3),
-      explodeTarget: +ctl.explodeTarget.toFixed(3),
-      servicePanels: +s.panels.toFixed(3),
-      cabinLight: +s.cabin.toFixed(2),
-      navLights: s.nav > 0.5,
-      turretYawDeg: +((ctl.turretYaw * 180) / Math.PI).toFixed(1),
-      turretPitchDeg: +((ctl.turretPitch * 180) / Math.PI).toFixed(1),
-      scanning: ctl.scanning,
-      turretManual: ctl.turretManual,
-      reducedMotion: ctl.reducedMotion,
-      clock: +ctl.clock.toFixed(3)
+      state: this.state,
+      moving: this.isMoving(),
+      nacelleAngleDeg: +(v.tilt * 90).toFixed(2),
+      rotorRpm: +(v.rpm * RPM_MAX).toFixed(1),
+      rotorNormalised: +v.rpm.toFixed(4),
+      gear: v.gear > 0.99 ? 'down' : v.gear < 0.01 ? 'up' : 'in transit',
+      gearValue: +v.gear.toFixed(4),
+      gearDoors: v.gearDoor > 0.99 ? 'open' : v.gearDoor < 0.01 ? 'closed' : 'moving',
+      sponsons: v.sponson > 0.99 ? 'extended' : v.sponson < 0.01 ? 'retracted' : 'in transit',
+      sponsonValue: +v.sponson.toFixed(4),
+      door: v.door > 0.99 ? 'open' : v.door < 0.01 ? 'closed' : 'moving',
+      doorValue: +v.door.toFixed(4),
+      winchBoom: v.winch > 0.99 ? 'outboard' : v.winch < 0.01 ? 'stowed' : 'slewing',
+      cableMetres: +v.cable.toFixed(3),
+      cableMax: CABLE_MAX,
+      explode: +v.explode.toFixed(4),
+      explodeAllowed: this.explodeAllowed(),
+      hoistAllowed: this.hoistAllowed(),
+      panels: +v.panels.toFixed(3),
+      powered: this.targets().powered === 1,
+      sensorAzimuthDeg: +this.sensorAz.toFixed(1),
+      sensorElevationDeg: +this.sensorEl.toFixed(1),
+      autoScan: this.autoScan,
+      reducedMotion: this.reducedMotion,
+      simTime: +this.time.toFixed(3)
     };
   }
 
-  /** Non-mutating legality report used by validate(). */
-  function legality() {
+  /** Legality of the current mechanical combination — used by validate(). */
+  legality() {
     const errors = [];
     const warnings = [];
-    if (s.gear > 0.05 && s.gearDoor < 0.6) errors.push('gear extended while gear doors are closing');
-    if (s.cable > CABLE_STOW + 0.05 && s.door < 0.8) errors.push('hoist cable extended through a closed rescue door');
-    if (s.cable > CABLE_STOW + 0.05 && s.arm < 0.7) errors.push('hoist cable extended with the boom stowed');
-    if (s.explode > 0.005 && ctl.state !== 'maintenance') errors.push('exploded view active outside maintenance');
-    if (s.explode > 0.005 && s.rpm > 0.02) errors.push('rotors turning while exploded view is active');
-    if (ctl.state === 'maintenance' && s.rpm > 0.05 && !ctl.transitioning) errors.push('rotors turning in maintenance');
-    if (ctl.state === 'cruise' && !ctl.transitioning && (s.gear > 0.05 || s.sponson > 0.05)) {
-      errors.push('cruise state with gear or sponsons deployed');
-    }
-    if (ctl.state === 'rescue' && !ctl.transitioning && s.door < 0.9) warnings.push('rescue state door not fully open yet');
-    if (ctl.state === 'hover' && !ctl.transitioning && s.tilt < 0.98) warnings.push('hover state nacelles not vertical');
+    const v = this.v;
+    if (v.cable > 0.02 && v.door < 0.85) errors.push('cable extended with the rescue door not open');
+    if (v.cable > 0.02 && this.state !== 'rescue') warnings.push('cable still stowing after leaving the rescue state');
+    if (v.gear > 0.05 && v.gearDoor < 0.85) errors.push('landing gear extended with bay doors not open');
+    if (v.explode > 0.005 && this.state !== 'maintenance') errors.push('exploded view active outside maintenance');
+    if (v.explode > 0.005 && v.rpm > 0.02) errors.push('exploded view active with rotors turning');
+    if (this.state === 'maintenance' && v.rpm > 0.02) warnings.push('maintenance selected while rotors are still spinning down');
+    if (this.state === 'cruise' && v.gear > 0.05) warnings.push('cruise selected while the gear is still retracting');
+    if (v.winch < 0.75 && v.cable > 0.02) errors.push('cable extended with the hoist boom stowed');
     return { errors, warnings };
   }
 
-  applyTransforms();
-  applyLights(0);
-
-  return {
-    ctl,
-    scalars: s,
-    update,
-    requestState,
-    setExplode,
-    reset,
-    snapshot,
-    legality,
-    setCableCommand: (dir) => {
-      ctl.cableCommand = Math.sign(dir);
-    },
-    setBoom: (out) => {
-      if (ctl.state !== 'rescue') return false;
-      ctl.boomOverride = !!out;
-      if (!out) ctl.cableTarget = CABLE_STOW;
-      return true;
-    },
-    /** null when exploded; otherwise max deviation from authored transforms. */
-    explodeCheck: () => {
-      if (s.explode > 1e-6) return null;
-      let max = 0;
-      for (const item of explodeItems) {
-        const ref = dynamicBase.get(item.obj) || item.base;
-        max = Math.max(max, item.obj.position.distanceTo(ref));
-      }
-      return max;
-    },
-    setScanning: (on) => {
-      ctl.scanning = !!on;
-      if (on) ctl.turretManual = false;
-    },
-    pointTurret: (dyaw, dpitch) => {
-      ctl.turretManual = true;
-      ctl.scanning = false;
-      ctl.turretYaw = Math.min(1.6, Math.max(-1.6, ctl.turretYaw + dyaw));
-      ctl.turretPitch = Math.min(0.7, Math.max(-0.7, ctl.turretPitch + dpitch));
-    },
-    setReducedMotion: (on) => {
-      ctl.reducedMotion = !!on;
-    },
-    isHoistReady: () => ctl.state === 'rescue' && s.door > 0.9 && s.arm > 0.85,
-    limits: { CABLE_STOW, CABLE_MAX, RPM_MAX }
-  };
+  dispose() {
+    for (const m of this._ownMaterials) m.dispose();
+    this._ownMaterials.length = 0;
+  }
 }

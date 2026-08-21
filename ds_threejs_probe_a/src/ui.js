@@ -1,252 +1,223 @@
 /**
- * Asterion HX-9 — technical UI layer.
- * Owns all DOM wiring, keyboard shortcuts, telemetry and the hotspot card.
- * The 3D layer never renders essential text into the canvas.
+ * ui.js — semantic, keyboard-operable technical UI for the HX-9 viewer.
+ * The DOM is authored in index.html; this module wires it, keeps ARIA state
+ * honest, throttles telemetry writes and owns the hotspot marker overlay.
  */
 
-const el = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id);
 
-export const SHORTCUTS = [
-  ['1 … 6', 'Select state: ground, hover, transition, cruise, rescue, maintenance'],
-  ['F / L / R', 'Camera: front, port beam, starboard rescue door'],
-  ['O / K / N', 'Camera: overhead, cockpit, winch'],
-  ['G', 'Cycle lighting mode (dusk ⇄ night inspection)'],
-  ['[ / ]', 'Exploded view −/+ (maintenance only)'],
-  ['↑ / ↓', 'Hoist cable raise / lower (rescue only)'],
-  ['B', 'Deploy or stow the hoist boom'],
-  [', / .', 'Point sensor turret left / right'],
-  ['S', 'Toggle automatic turret scan'],
-  ['Space', 'Pause / resume animation'],
-  ['X', 'Deterministic reset'],
-  ['M', 'Toggle reduced motion'],
-  ['H or ?', 'Help'],
-  ['Esc', 'Dismiss hotspot card / help']
-];
-
-export function createUI(api) {
-  const ui = {};
-  const stateGroup = el('stateGroup');
-  const camGroup = el('camGroup');
-  const lightGroup = el('lightGroup');
-  const explode = el('explode');
-  const explodeVal = el('explodeVal');
-  const explodeHint = el('explodeHint');
-  const hotspotList = el('hotspotList');
-  const card = el('hotspotCard');
-  const cardTitle = el('hsTitle');
-  const cardBody = el('hsBody');
-  const transitionIndicator = el('transitionIndicator');
-  const winchBtn = el('winchToggle');
-  const cableDown = el('cableDown');
-  const cableUp = el('cableUp');
-  const winchHint = el('winchHint');
-  const scanBtn = el('sensorScan');
-  const panBtns = [el('sensorLeft'), el('sensorRight'), el('sensorUp'), el('sensorDown')];
-  const pauseBtn = el('pause');
-  const resetBtn = el('reset');
-  const helpBtn = el('help');
-  const rmBtn = el('reducedMotion');
-  const helpDialog = el('helpDialog');
-  const t = {
-    state: el('tState'), nacelle: el('tNacelle'), rpm: el('tRpm'), gear: el('tGear'),
-    sponson: el('tSponson'), door: el('tDoor'), cable: el('tCable'), cam: el('tCam'),
-    calls: el('tCalls'), tris: el('tTris'), fps: el('tFps'), turret: el('tTurret')
-  };
-
-  /* ---------- state buttons ---------- */
-  const stateButtons = Array.from(stateGroup.querySelectorAll('button[data-state]'));
-  stateButtons.forEach((b) => {
-    b.addEventListener('click', () => api.setState(b.dataset.state));
-  });
-  const camButtons = Array.from(camGroup.querySelectorAll('button[data-cam]'));
-  camButtons.forEach((b) => b.addEventListener('click', () => api.setCamera(b.dataset.cam)));
-  const lightButtons = Array.from(lightGroup.querySelectorAll('button[data-light]'));
-  lightButtons.forEach((b) => b.addEventListener('click', () => api.setLighting(b.dataset.light)));
-
-  explode.addEventListener('input', () => {
-    api.setExplode(Number(explode.value) / 100);
-  });
-
-  winchBtn.addEventListener('click', () => api.toggleBoom());
-  const holdCable = (btn, dir) => {
-    const start = (ev) => {
-      ev.preventDefault();
-      api.setCableCommand(dir);
+export class UI {
+  constructor(handlers) {
+    this.h = handlers;
+    this.el = {
+      stateRadios: Array.from(document.querySelectorAll('input[name="hx9state"]')),
+      lightRadios: Array.from(document.querySelectorAll('input[name="hx9light"]')),
+      camButtons: Array.from(document.querySelectorAll('[data-cam]')),
+      transition: $('transition-indicator'),
+      explode: $('explode'),
+      explodeOut: $('explode-out'),
+      hoistDown: $('btn-hoist-down'),
+      hoistUp: $('btn-hoist-up'),
+      hoistStow: $('btn-hoist-stow'),
+      az: $('sensor-az'),
+      azOut: $('sensor-az-out'),
+      el2: $('sensor-el'),
+      elOut: $('sensor-el-out'),
+      scan: $('btn-scan'),
+      pause: $('btn-pause'),
+      reset: $('btn-reset'),
+      motion: $('btn-motion'),
+      help: $('btn-help'),
+      helpDialog: $('help'),
+      helpClose: $('help-close'),
+      list: $('hotspot-list'),
+      hsTitle: $('hs-title'),
+      hsBody: $('hs-body'),
+      markers: $('markers'),
+      boot: $('boot'),
+      t: {
+        nacelle: $('t-nacelle'), rpm: $('t-rpm'), gear: $('t-gear'), sponson: $('t-sponson'),
+        door: $('t-door'), cable: $('t-cable'), cam: $('t-cam'), calls: $('t-calls'),
+        tris: $('t-tris'), fps: $('t-fps')
+      }
     };
-    const stop = () => api.setCableCommand(0);
-    btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', stop);
-    btn.addEventListener('pointerleave', stop);
-    btn.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') api.setCableCommand(dir);
-    });
-    btn.addEventListener('keyup', stop);
-    btn.addEventListener('blur', stop);
-  };
-  holdCable(cableDown, 1);
-  holdCable(cableUp, -1);
-
-  scanBtn.addEventListener('click', () => api.toggleScan());
-  const panDeltas = [[-0.09, 0], [0.09, 0], [0, 0.07], [0, -0.07]];
-  panBtns.forEach((b, i) => b.addEventListener('click', () => api.pointTurret(panDeltas[i][0], panDeltas[i][1])));
-
-  pauseBtn.addEventListener('click', () => api.togglePause());
-  resetBtn.addEventListener('click', () => api.reset());
-  rmBtn.addEventListener('click', () => api.toggleReducedMotion());
-  helpBtn.addEventListener('click', () => openHelp(true));
-  el('helpClose').addEventListener('click', () => openHelp(false));
-  el('hsClose').addEventListener('click', () => ui.hideHotspot());
-
-  function openHelp(open) {
-    if (open) {
-      if (typeof helpDialog.showModal === 'function') helpDialog.showModal();
-      else helpDialog.setAttribute('open', '');
-    } else if (typeof helpDialog.close === 'function') helpDialog.close();
-    else helpDialog.removeAttribute('open');
+    this.markerEls = [];
+    this.activeHotspot = null;
+    this._lastTel = 0;
+    this._bind();
   }
 
-  /* ---------- help contents + hotspot list ---------- */
-  const shortcutTable = el('shortcutTable');
-  SHORTCUTS.forEach(([k, d]) => {
-    const tr = document.createElement('tr');
-    const th = document.createElement('th');
-    th.scope = 'row';
-    th.textContent = k;
-    const td = document.createElement('td');
-    td.textContent = d;
-    tr.append(th, td);
-    shortcutTable.append(tr);
-  });
+  _bind() {
+    const h = this.h;
+    this.el.stateRadios.forEach((r) => r.addEventListener('change', () => r.checked && h.onState(r.value)));
+    this.el.lightRadios.forEach((r) => r.addEventListener('change', () => r.checked && h.onLight(r.value)));
+    this.el.camButtons.forEach((b) => b.addEventListener('click', () => h.onCamera(b.dataset.cam)));
 
-  api.hotspots.forEach((h) => {
-    const li = document.createElement('li');
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'hs';
-    b.dataset.hotspot = h.id;
-    b.textContent = h.title;
-    b.addEventListener('click', () => api.focusHotspot(h.id));
-    li.append(b);
-    hotspotList.append(li);
-  });
+    this.el.explode.addEventListener('input', () => h.onExplode(parseFloat(this.el.explode.value)));
+    this.el.hoistDown.addEventListener('click', () => h.onHoist(1));
+    this.el.hoistUp.addEventListener('click', () => h.onHoist(-1));
+    this.el.hoistStow.addEventListener('click', () => h.onHoist(0));
 
-  /* ---------- keyboard ---------- */
-  const stateKeys = { 1: 'ground', 2: 'hover', 3: 'transition', 4: 'cruise', 5: 'rescue', 6: 'maintenance' };
-  const camKeys = { f: 'front', l: 'port', r: 'starboard', o: 'top', k: 'cockpit', n: 'winch' };
-  window.addEventListener('keydown', (ev) => {
-    const tag = ev.target && ev.target.tagName;
-    if (tag === 'INPUT' && ev.target.type === 'range' && (ev.key.startsWith('Arrow') || ev.key === 'Home' || ev.key === 'End')) return;
-    const k = ev.key;
-    const lower = k.toLowerCase();
-    if (stateKeys[k]) {
-      api.setState(stateKeys[k]);
-    } else if (camKeys[lower]) {
-      api.setCamera(camKeys[lower]);
-    } else if (lower === 'g') {
-      api.cycleLighting();
-    } else if (k === '[' || k === ']') {
-      api.nudgeExplode(k === '[' ? -0.1 : 0.1);
-    } else if (k === 'ArrowDown' || k === 'ArrowUp') {
-      api.nudgeCable(k === 'ArrowDown' ? 1 : -1);
-    } else if (lower === 'b') {
-      api.toggleBoom();
-    } else if (k === ',' || k === '.') {
-      api.pointTurret(k === ',' ? -0.12 : 0.12, 0);
-    } else if (lower === 's') {
-      api.toggleScan();
-    } else if (k === ' ') {
-      api.togglePause();
-    } else if (lower === 'x') {
-      api.reset();
-    } else if (lower === 'm') {
-      api.toggleReducedMotion();
-    } else if (lower === 'h' || k === '?') {
-      openHelp(!helpDialog.open);
-    } else if (k === 'Escape') {
-      ui.hideHotspot();
-      openHelp(false);
-      return;
-    } else {
-      return;
-    }
-    ev.preventDefault();
-  });
+    const sensor = () => h.onSensor(parseFloat(this.el.az.value), parseFloat(this.el2v()));
+    this.el.az.addEventListener('input', sensor);
+    this.el.el2.addEventListener('input', sensor);
+    this.el.scan.addEventListener('click', () => h.onScan(this.el.scan.getAttribute('aria-pressed') !== 'true'));
 
-  /* ---------- public surface ---------- */
-  ui.showHotspot = (h) => {
-    cardTitle.textContent = h.title;
-    cardBody.textContent = h.body;
-    card.hidden = false;
-    Array.from(hotspotList.querySelectorAll('button')).forEach((b) =>
-      b.setAttribute('aria-current', b.dataset.hotspot === h.id ? 'true' : 'false')
-    );
-  };
-  ui.hideHotspot = () => {
-    card.hidden = true;
-    Array.from(hotspotList.querySelectorAll('button')).forEach((b) => b.setAttribute('aria-current', 'false'));
-  };
-  ui.setLightingMode = (mode) => {
-    lightButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.light === mode)));
-  };
-  ui.setPaused = (p) => {
-    pauseBtn.setAttribute('aria-pressed', String(p));
-    pauseBtn.textContent = p ? 'Resume' : 'Pause';
-  };
-  ui.setReducedMotion = (p) => rmBtn.setAttribute('aria-pressed', String(p));
-  ui.setCamera = (id) => camButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.cam === id)));
-  ui.showError = (msg) => {
-    const panel = el('errorPanel');
-    el('errorText').textContent = msg;
-    panel.hidden = false;
-  };
+    this.el.pause.addEventListener('click', () => h.onPause());
+    this.el.reset.addEventListener('click', () => h.onReset());
+    this.el.motion.addEventListener('click', () => h.onReducedMotion(this.el.motion.getAttribute('aria-pressed') !== 'true'));
+    this.el.help.addEventListener('click', () => this.openHelp());
+    this.el.helpClose.addEventListener('click', () => this.el.helpDialog.close());
 
-  let last = 0;
-  ui.update = (snap, metrics, now) => {
-    stateButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.state === snap.state)));
-    if (now - last < 110) return;
-    last = now;
-    const maint = snap.state === 'maintenance';
-    explode.disabled = !maint;
-    explode.setAttribute('aria-disabled', String(!maint));
-    explodeHint.textContent = maint
-      ? 'Assemblies separate along authored service vectors.'
-      : 'Available in maintenance state only.';
-    const sliderPct = Math.round((snap.explodeTarget != null ? snap.explodeTarget : snap.explode) * 100);
-    if (document.activeElement !== explode) explode.value = String(sliderPct);
-    explodeVal.textContent = `${Math.round(snap.explode * 100)}%`;
+    window.addEventListener('keydown', (e) => this._key(e));
+  }
 
-    const hoist = snap.state === 'rescue';
-    winchBtn.disabled = !hoist;
-    winchBtn.setAttribute('aria-pressed', String(snap.winchBoom > 0.5));
-    const cableOk = hoist && snap.rescueDoor > 0.9 && snap.winchBoom > 0.85;
-    cableDown.disabled = !cableOk;
-    cableUp.disabled = !cableOk;
-    winchHint.textContent = hoist
-      ? cableOk
-        ? 'Hoist live — boom out, door open.'
-        : 'Waiting for door and boom.'
-      : 'Hoist enabled in rescue state only.';
-    scanBtn.setAttribute('aria-pressed', String(snap.scanning));
-    scanBtn.disabled = maint;
-    panBtns.forEach((b) => (b.disabled = maint));
+  el2v() { return this.el.el2.value; }
 
-    transitionIndicator.textContent = snap.transitioning ? `TRANSITION → ${snap.state}` : 'CONFIGURATION STEADY';
-    transitionIndicator.dataset.busy = String(snap.transitioning);
+  _key(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const tag = (e.target && e.target.tagName) || '';
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if (e.key === 'Escape') { if (this.el.helpDialog.open) this.el.helpDialog.close(); return; }
+    if (typing) return;
+    const h = this.h;
+    const states = { 1: 'ground', 2: 'hover', 3: 'transition', 4: 'cruise', 5: 'rescue', 6: 'maintenance' };
+    const cams = { q: 'threequarter', f: 'front', p: 'port', s: 'starboard', t: 'top', c: 'cockpit', w: 'winch' };
+    const k = e.key.toLowerCase();
+    if (states[e.key]) { h.onState(states[e.key]); e.preventDefault(); return; }
+    if (cams[k]) { h.onCamera(cams[k]); e.preventDefault(); return; }
+    if (k === 'l') { h.onLightCycle(); e.preventDefault(); return; }
+    if (k === 'e') { h.onExplodeToggle(); e.preventDefault(); return; }
+    if (k === ']') { h.onHoist(1); e.preventDefault(); return; }
+    if (k === '[') { h.onHoist(-1); e.preventDefault(); return; }
+    if (k === 'r') { h.onReset(); e.preventDefault(); return; }
+    if (k === 'm') { h.onReducedMotion(this.el.motion.getAttribute('aria-pressed') !== 'true'); e.preventDefault(); return; }
+    if (k === 'h') { this.openHelp(); e.preventDefault(); return; }
+    if (e.key === ' ' && tag !== 'BUTTON') { h.onPause(); e.preventDefault(); }
+  }
 
-    t.state.textContent = snap.state;
+  openHelp() {
+    if (typeof this.el.helpDialog.showModal === 'function') this.el.helpDialog.showModal();
+    else this.el.helpDialog.setAttribute('open', '');
+  }
+
+  removeBoot() { if (this.el.boot) { this.el.boot.remove(); this.el.boot = null; } }
+
+  /* ---------------- hotspots ---------------- */
+
+  buildHotspots(hotspots) {
+    const frag = document.createDocumentFragment();
+    hotspots.forEach((hs, i) => {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `${String(i + 1).padStart(2, '0')} · ${hs.label}`;
+      b.setAttribute('aria-pressed', 'false');
+      b.dataset.hotspot = hs.id;
+      b.addEventListener('click', () => this.h.onHotspot(hs.id));
+      li.appendChild(b);
+      frag.appendChild(li);
+
+      const m = document.createElement('div');
+      m.className = 'marker';
+      m.textContent = String(i + 1);
+      m.style.display = 'none';
+      this.el.markers.appendChild(m);
+      this.markerEls.push(m);
+    });
+    this.el.list.appendChild(frag);
+  }
+
+  positionMarker(i, x, y, visible, active) {
+    const m = this.markerEls[i];
+    if (!m) return;
+    if (!visible) { if (m.style.display !== 'none') m.style.display = 'none'; return; }
+    if (m.style.display !== 'block') m.style.display = 'block';
+    m.style.left = `${x.toFixed(1)}px`;
+    m.style.top = `${y.toFixed(1)}px`;
+    const a = active ? 'true' : 'false';
+    if (m.dataset.active !== a) m.dataset.active = a;
+  }
+
+  setHotspot(hs) {
+    this.activeHotspot = hs ? hs.id : null;
+    this.el.list.querySelectorAll('button').forEach((b) => {
+      b.setAttribute('aria-pressed', hs && b.dataset.hotspot === hs.id ? 'true' : 'false');
+    });
+    this.el.hsTitle.textContent = hs ? hs.label : 'No point selected';
+    this.el.hsBody.textContent = hs ? hs.text
+      : 'Choose an inspection point to focus the camera and read its mechanical purpose.';
+  }
+
+  /* ---------------- control state ---------------- */
+
+  setState(name) {
+    this.el.stateRadios.forEach((r) => { r.checked = r.value === name; });
+  }
+
+  setLight(mode) {
+    this.el.lightRadios.forEach((r) => { r.checked = r.value === mode; });
+  }
+
+  setCamera(name) {
+    this.el.camButtons.forEach((b) => b.setAttribute('aria-pressed', b.dataset.cam === name ? 'true' : 'false'));
+    this.el.t.cam.textContent = name;
+  }
+
+  setExplodeValue(v) {
+    if (document.activeElement !== this.el.explode) this.el.explode.value = String(v);
+    this.el.explodeOut.textContent = `${Math.round(v * 100)}%`;
+  }
+
+  setExplodeEnabled(on) {
+    this.el.explode.disabled = !on;
+    this.el.explode.setAttribute('aria-disabled', on ? 'false' : 'true');
+  }
+
+  setHoistEnabled(on) {
+    [this.el.hoistDown, this.el.hoistUp, this.el.hoistStow].forEach((b) => { b.disabled = !on; });
+  }
+
+  setSensorEnabled(on) {
+    [this.el.az, this.el.el2].forEach((s) => { s.disabled = !on; });
+    this.el.scan.disabled = !on;
+  }
+
+  setSensor(az, el, autoScan) {
+    if (document.activeElement !== this.el.az) this.el.az.value = String(Math.round(az));
+    if (document.activeElement !== this.el.el2) this.el.el2.value = String(Math.round(el));
+    this.el.azOut.textContent = `${Math.round(az)}°`;
+    this.el.elOut.textContent = `${Math.round(el)}°`;
+    this.el.scan.setAttribute('aria-pressed', autoScan ? 'true' : 'false');
+  }
+
+  setPaused(p) {
+    this.el.pause.setAttribute('aria-pressed', p ? 'true' : 'false');
+    this.el.pause.firstChild.textContent = p ? 'Resume ' : 'Pause ';
+  }
+
+  setReducedMotion(on) {
+    this.el.motion.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+
+  setTransition(text, moving) {
+    this.el.transition.textContent = text;
+    this.el.transition.dataset.moving = moving ? 'true' : 'false';
+  }
+
+  /** Throttled: telemetry text is refreshed about eight times a second. */
+  setTelemetry(snap, perf, now) {
+    if (now - this._lastTel < 125) return;
+    this._lastTel = now;
+    const t = this.el.t;
     t.nacelle.textContent = `${snap.nacelleAngleDeg.toFixed(1)}°`;
-    t.rpm.textContent = `${snap.rotorRpm} rpm`;
-    t.gear.textContent = `${pct(snap.gear)} / doors ${pct(snap.gearDoors)}`;
-    t.sponson.textContent = pct(snap.sponsons);
-    t.door.textContent = pct(snap.rescueDoor);
-    t.cable.textContent = `${snap.cableLengthM.toFixed(2)} m`;
-    t.turret.textContent = `${snap.turretYawDeg.toFixed(0)}° / ${snap.turretPitchDeg.toFixed(0)}°`;
-    t.cam.textContent = metrics.camera;
-    t.calls.textContent = String(metrics.calls);
-    t.tris.textContent = metrics.triangles.toLocaleString('en-US');
-    t.fps.textContent = String(Math.round(metrics.fps));
-  };
-
-  const pct = (v) => (v > 0.995 ? 'deployed' : v < 0.005 ? 'stowed' : `${Math.round(v * 100)}%`);
-  return ui;
+    t.rpm.textContent = `${Math.round(snap.rotorRpm)} rpm`;
+    t.gear.textContent = snap.gear === 'down' ? `down · doors ${snap.gearDoors}` : `${snap.gear} · doors ${snap.gearDoors}`;
+    t.sponson.textContent = snap.sponsons;
+    t.door.textContent = snap.door;
+    t.cable.textContent = `${snap.cableMetres.toFixed(2)} m`;
+    t.calls.textContent = String(perf.calls);
+    t.tris.textContent = perf.triangles.toLocaleString('en-US');
+    t.fps.textContent = perf.fps.toFixed(0);
+  }
 }

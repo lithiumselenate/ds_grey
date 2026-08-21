@@ -1,23 +1,31 @@
 /**
- * Asterion HX-9 — procedural material + texture library.
- * All markings, roughness variation and environment data are generated at
- * runtime from a fixed seed. No external assets, no base64 blobs.
+ * materials.js — deterministic procedural texture + PBR material library
+ * for the Asterion HX-9 Amphibious Rescue Tiltrotor.
+ *
+ * Everything visible here is generated at runtime from the fixed seed string
+ * "HX9-FABLE-PROBE". No external images, fonts or binary blobs are used.
  */
+
 import * as THREE from 'three';
 
 export const SEED_STRING = 'HX9-FABLE-PROBE';
 
-/** Deterministic FNV-1a seeded mulberry32. */
-export function makeRng(seed = SEED_STRING) {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
+/** FNV-1a style string hash -> uint32. */
+export function hashSeed(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
-  let s = h >>> 0;
+  return h >>> 0;
+}
+
+/** Small, fast, fully deterministic PRNG (mulberry32). */
+export function makeRNG(seedString = SEED_STRING) {
+  let a = hashSeed(seedString) >>> 0;
   return function rng() {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -25,584 +33,593 @@ export function makeRng(seed = SEED_STRING) {
 }
 
 export const PALETTE = {
-  ivory: '#e7e2d6',
-  ivoryDim: '#cdc7ba',
-  orange: '#dd611c',
-  orangeDeep: '#a8420f',
-  graphite: '#23272b',
-  graphiteLight: '#3a4046',
-  cyan: '#59dcf2',
-  amber: '#f0a63c'
+  ivory: 0xe6e2d7,
+  ivoryShadow: 0xcfcabd,
+  orange: 0xef5f16,
+  orangeDeep: 0xc2410a,
+  graphite: 0x24282d,
+  graphiteLight: 0x3a4046,
+  metal: 0x9ea6ad,
+  metalWarm: 0xb0a294,
+  rubber: 0x121417,
+  glass: 0x1d2c33,
+  fabric: 0x353b44,
+  lens: 0x080f13,
+  cyan: 0x4fd6ef,
+  amber: 0xf2a33c,
+  red: 0xff3b30,
+  green: 0x2fe08a,
+  deck: 0x2c3035
 };
 
-const FONT = '"Arial Narrow", "Helvetica Neue", Arial, Helvetica, sans-serif';
+const TAU = Math.PI * 2;
 
-function mkCanvas(w, h, fill) {
+/* ------------------------------------------------------------------ */
+/* canvas helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+function canvas2d(w, h) {
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   const ctx = c.getContext('2d');
-  if (fill) {
-    ctx.fillStyle = fill;
-    ctx.fillRect(0, 0, w, h);
-  }
+  ctx.imageSmoothingEnabled = true;
   return { c, ctx };
 }
 
-/** Letter-spaced technical lettering; returns drawn width. */
-function techText(ctx, text, x, y, o = {}) {
-  const size = o.size || 40;
-  const weight = o.weight || 700;
-  const spacing = o.spacing == null ? size * 0.14 : o.spacing;
-  ctx.font = `${weight} ${size}px ${FONT}`;
-  ctx.textBaseline = 'alphabetic';
-  let w = -spacing;
-  for (const ch of text) w += ctx.measureText(ch).width + spacing;
-  let cx = o.align === 'center' ? x - w / 2 : o.align === 'right' ? x - w : x;
-  ctx.fillStyle = o.color || PALETTE.ivory;
+function hairline(ctx, x0, y0, x1, y1, w, color) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = w;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+}
+
+/** Diagonal hazard band used on nacelles, gear bays and the door sill. */
+function hazardBand(ctx, x, y, w, h, pitch, a, b) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  ctx.fillStyle = a;
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = b;
+  for (let i = -h; i < w + h; i += pitch * 2) {
+    ctx.beginPath();
+    ctx.moveTo(x + i, y + h);
+    ctx.lineTo(x + i + pitch, y + h);
+    ctx.lineTo(x + i + pitch + h, y);
+    ctx.lineTo(x + i + h, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function stencilText(ctx, text, x, y, size, color, spacing, weight) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.font = `${weight || 700} ${size}px ${size > 30 ? 'sans-serif' : 'monospace'}`;
+  ctx.textBaseline = 'middle';
+  let cx = x;
   for (const ch of text) {
     ctx.fillText(ch, cx, y);
-    cx += ctx.measureText(ch).width + spacing;
-  }
-  return w;
-}
-
-/* ------------------------------------------------------------------ *
- * Individual procedural textures
- * ------------------------------------------------------------------ */
-
-function texWordmark() {
-  const { c, ctx } = mkCanvas(1024, 256);
-  ctx.save();
-  ctx.translate(112, 128);
-  ctx.beginPath();
-  for (let i = 0; i < 6; i++) {
-    const a = (Math.PI / 3) * i - Math.PI / 6;
-    const px = Math.cos(a) * 78;
-    const py = Math.sin(a) * 78;
-    if (i) ctx.lineTo(px, py);
-    else ctx.moveTo(px, py);
-  }
-  ctx.closePath();
-  ctx.lineWidth = 12;
-  ctx.strokeStyle = PALETTE.orange;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(-38, 26);
-  ctx.lineTo(0, -34);
-  ctx.lineTo(38, 26);
-  ctx.lineTo(18, 26);
-  ctx.lineTo(0, -2);
-  ctx.lineTo(-18, 26);
-  ctx.closePath();
-  ctx.fillStyle = PALETTE.ivory;
-  ctx.fill();
-  ctx.restore();
-
-  techText(ctx, 'ASTERION', 226, 118, { size: 84, color: PALETTE.ivory, spacing: 12 });
-  techText(ctx, 'HX-9', 226, 208, { size: 76, color: PALETTE.orange, spacing: 8 });
-  ctx.fillStyle = PALETTE.cyan;
-  ctx.fillRect(452, 150, 292, 6);
-  techText(ctx, 'AMPHIBIOUS RESCUE TILTROTOR', 452, 208, {
-    size: 28,
-    weight: 600,
-    color: PALETTE.ivoryDim,
-    spacing: 5
-  });
-  return c;
-}
-
-function texChevron() {
-  const { c, ctx } = mkCanvas(512, 128);
-  for (let i = -1; i < 8; i++) {
-    ctx.beginPath();
-    const x = i * 76;
-    ctx.moveTo(x, 128);
-    ctx.lineTo(x + 46, 0);
-    ctx.lineTo(x + 90, 0);
-    ctx.lineTo(x + 44, 128);
-    ctx.closePath();
-    ctx.fillStyle = i % 2 ? PALETTE.orangeDeep : PALETTE.orange;
-    ctx.fill();
-  }
-  return c;
-}
-
-function texCaution() {
-  const { c, ctx } = mkCanvas(512, 96, PALETTE.graphite);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, 512, 96);
-  ctx.clip();
-  for (let i = -2; i < 14; i++) {
-    ctx.beginPath();
-    const x = i * 44;
-    ctx.moveTo(x, 96);
-    ctx.lineTo(x + 26, 0);
-    ctx.lineTo(x + 50, 0);
-    ctx.lineTo(x + 24, 96);
-    ctx.closePath();
-    ctx.fillStyle = PALETTE.amber;
-    ctx.fill();
+    cx += ctx.measureText(ch).width + (spacing || 0);
   }
   ctx.restore();
-  ctx.strokeStyle = 'rgba(20,22,25,0.9)';
-  ctx.lineWidth = 8;
-  ctx.strokeRect(0, 0, 512, 96);
-  return c;
+  return cx - x;
 }
 
-function texDoorArrow() {
-  const { c, ctx } = mkCanvas(512, 256);
-  ctx.strokeStyle = PALETTE.orange;
-  ctx.lineWidth = 9;
-  ctx.strokeRect(16, 16, 480, 224);
-  ctx.fillStyle = PALETTE.orange;
-  ctx.beginPath();
-  ctx.moveTo(56, 128);
-  ctx.lineTo(146, 62);
-  ctx.lineTo(146, 100);
-  ctx.lineTo(238, 100);
-  ctx.lineTo(238, 156);
-  ctx.lineTo(146, 156);
-  ctx.lineTo(146, 194);
-  ctx.closePath();
-  ctx.fill();
-  techText(ctx, 'RESCUE ACCESS', 270, 112, { size: 36, color: PALETTE.ivory, spacing: 4 });
-  techText(ctx, 'LIFT HANDLE — SLIDE AFT', 270, 156, {
-    size: 21,
-    weight: 600,
-    color: PALETTE.ivoryDim,
-    spacing: 3
-  });
-  techText(ctx, 'HX-9 / DR-2', 270, 200, { size: 20, weight: 600, color: PALETTE.cyan, spacing: 3 });
-  return c;
-}
-
-function texLabel(lines, o = {}) {
-  const { c, ctx } = mkCanvas(512, 256);
-  if (o.plate) {
-    ctx.fillStyle = 'rgba(28,31,35,0.9)';
-    ctx.fillRect(8, 8, 496, 240);
-    ctx.strokeStyle = 'rgba(168,176,183,0.75)';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(8, 8, 496, 240);
-  }
-  lines.forEach((line, i) => {
-    techText(ctx, line, 256, i === 0 ? 118 : 186, {
-      size: i === 0 ? 62 : 34,
-      weight: i === 0 ? 700 : 600,
-      align: 'center',
-      color: i === 0 ? o.color || PALETTE.graphite : o.sub || PALETTE.ivoryDim,
-      spacing: 4
-    });
-  });
-  return c;
-}
-
-function texNacelleWarn() {
-  const { c, ctx } = mkCanvas(1024, 128);
-  ctx.fillStyle = 'rgba(24,27,30,0.95)';
-  ctx.fillRect(0, 0, 1024, 128);
-  ctx.fillStyle = PALETTE.amber;
-  ctx.fillRect(0, 6, 1024, 5);
-  ctx.fillRect(0, 117, 1024, 5);
-  for (let i = 0; i < 2; i++) {
-    techText(ctx, 'ROTOR HAZARD — STAND CLEAR', 34 + i * 512, 58, {
-      size: 32,
-      color: PALETTE.amber,
-      spacing: 4
-    });
-    techText(ctx, 'EXHAUST HOT · PIVOT LOCK P-4', 34 + i * 512, 98, {
-      size: 22,
-      weight: 600,
-      color: PALETTE.ivoryDim,
-      spacing: 3
-    });
-  }
-  return c;
-}
-
-function texPaintRough(rng) {
-  const { c, ctx } = mkCanvas(512, 512, '#8c8c8c');
-  for (let i = 0; i < 420; i++) {
-    const x = rng() * 512;
-    const y = rng() * 512;
-    const r = 6 + rng() * 46;
+/** Soft, seeded blotches: used for wear and roughness break-up. */
+function blotches(ctx, rng, count, w, h, maxR, color) {
+  for (let i = 0; i < count; i++) {
+    const x = rng() * w;
+    const y = rng() * h;
+    const r = maxR * (0.25 + rng() * 0.75);
     const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    const v = 118 + Math.floor(rng() * 44);
-    g.addColorStop(0, `rgba(${v},${v},${v},0.3)`);
-    g.addColorStop(1, 'rgba(140,140,140,0)');
+    g.addColorStop(0, color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.arc(x, y, r, 0, TAU);
     ctx.fill();
   }
-  ctx.strokeStyle = 'rgba(176,176,176,0.4)';
-  ctx.lineWidth = 2;
-  for (let i = 1; i < 8; i++) {
-    ctx.beginPath();
-    ctx.moveTo((i * 512) / 8, 0);
-    ctx.lineTo((i * 512) / 8, 512);
-    ctx.moveTo(0, (i * 512) / 8);
-    ctx.lineTo(512, (i * 512) / 8);
-    ctx.stroke();
-  }
-  return c;
 }
 
-function texWear(rng) {
-  const { c, ctx } = mkCanvas(512, 512);
-  for (let i = 0; i < 90; i++) {
-    const x = rng() * 512;
-    const y = 300 + rng() * 200;
-    ctx.strokeStyle = `rgba(58,62,66,${0.05 + rng() * 0.09})`;
-    ctx.lineWidth = 1 + rng() * 3;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + (rng() - 0.5) * 40, y + 40 + rng() * 120);
-    ctx.stroke();
-  }
-  for (let i = 0; i < 26; i++) {
-    ctx.fillStyle = `rgba(96,100,104,${0.04 + rng() * 0.06})`;
-    ctx.beginPath();
-    ctx.ellipse(rng() * 512, rng() * 512, 8 + rng() * 30, 4 + rng() * 12, rng() * 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  return c;
-}
+/* ------------------------------------------------------------------ */
+/* asset library                                                       */
+/* ------------------------------------------------------------------ */
 
-function texDisc() {
-  const { c, ctx } = mkCanvas(512, 512);
-  const g = ctx.createRadialGradient(256, 256, 60, 256, 256, 250);
-  g.addColorStop(0, 'rgba(28,31,35,0)');
-  g.addColorStop(0.45, 'rgba(34,38,42,0.3)');
-  g.addColorStop(0.88, 'rgba(52,57,62,0.42)');
-  g.addColorStop(1, 'rgba(52,57,62,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 512, 512);
-  ctx.strokeStyle = 'rgba(226,222,212,0.16)';
-  for (let i = 0; i < 5; i++) {
-    ctx.lineWidth = 6;
-    ctx.beginPath();
-    const a = (i / 5) * Math.PI * 2;
-    ctx.moveTo(256 + Math.cos(a) * 70, 256 + Math.sin(a) * 70);
-    ctx.lineTo(256 + Math.cos(a) * 244, 256 + Math.sin(a) * 244);
-    ctx.stroke();
+export class Assets {
+  constructor(rng, maxAnisotropy) {
+    this.rng = rng;
+    this.aniso = Math.min(8, Math.max(1, maxAnisotropy || 1));
+    this.textures = [];
+    this.materials = [];
+    this.tex = {};
+    this.mats = {};
+    this._buildTextures();
+    this._buildMaterials();
   }
-  ctx.strokeStyle = 'rgba(221,97,28,0.35)';
-  ctx.lineWidth = 10;
-  ctx.beginPath();
-  ctx.arc(256, 256, 238, 0, Math.PI * 2);
-  ctx.stroke();
-  return c;
-}
 
-function texHotspot() {
-  const { c, ctx } = mkCanvas(128, 128);
-  ctx.strokeStyle = 'rgba(16,22,26,0.85)';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.arc(64, 64, 47, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(89,220,242,0.95)';
-  ctx.lineWidth = 7;
-  ctx.beginPath();
-  ctx.arc(64, 64, 42, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = 'rgba(231,226,214,0.95)';
-  ctx.beginPath();
-  ctx.arc(64, 64, 11, 0, Math.PI * 2);
-  ctx.fill();
-  return c;
-}
-
-function texFloor(rng) {
-  const { c, ctx } = mkCanvas(1024, 1024, '#3b3d40');
-  for (let gx = 0; gx < 4; gx++) {
-    for (let gy = 0; gy < 4; gy++) {
-      const v = 52 + Math.floor(rng() * 12);
-      ctx.fillStyle = `rgb(${v},${v + 1},${v + 3})`;
-      ctx.fillRect(gx * 256 + 3, gy * 256 + 3, 250, 250);
-      for (let i = 0; i < 70; i++) {
-        const s = 2 + rng() * 9;
-        ctx.fillStyle = `rgba(${v + 26},${v + 26},${v + 28},${0.05 + rng() * 0.12})`;
-        ctx.fillRect(gx * 256 + rng() * 250, gy * 256 + rng() * 250, s, s);
-      }
+  _track(t, srgb, repeatX, repeatY) {
+    t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    t.anisotropy = this.aniso;
+    if (repeatX) {
+      t.wrapS = THREE.RepeatWrapping;
+      t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(repeatX, repeatY || repeatX);
     }
-  }
-  ctx.strokeStyle = 'rgba(20,22,24,0.9)';
-  ctx.lineWidth = 6;
-  for (let i = 0; i <= 4; i++) {
-    ctx.beginPath();
-    ctx.moveTo(i * 256, 0);
-    ctx.lineTo(i * 256, 1024);
-    ctx.moveTo(0, i * 256);
-    ctx.lineTo(1024, i * 256);
-    ctx.stroke();
-  }
-  return c;
-}
-
-function texPad() {
-  const { c, ctx } = mkCanvas(1024, 1024);
-  ctx.save();
-  ctx.translate(512, 512);
-  ctx.strokeStyle = 'rgba(221,97,28,0.72)';
-  ctx.lineWidth = 16;
-  ctx.setLineDash([56, 34]);
-  ctx.beginPath();
-  ctx.arc(0, 0, 430, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.lineWidth = 10;
-  ctx.strokeStyle = 'rgba(231,226,214,0.5)';
-  ctx.beginPath();
-  ctx.arc(0, 0, 340, 0, Math.PI * 2);
-  ctx.stroke();
-  for (let i = 0; i < 4; i++) {
-    ctx.save();
-    ctx.rotate((Math.PI / 2) * i);
-    ctx.strokeStyle = 'rgba(231,226,214,0.62)';
-    ctx.lineWidth = 14;
-    ctx.beginPath();
-    ctx.moveTo(180, -300);
-    ctx.lineTo(300, -300);
-    ctx.lineTo(300, -180);
-    ctx.stroke();
-    ctx.restore();
-  }
-  techText(ctx, 'PAD 03', 0, -50, {
-    size: 96,
-    align: 'center',
-    color: 'rgba(231,226,214,0.58)',
-    spacing: 14
-  });
-  techText(ctx, 'AMPHIB · MAX 9.4 t', 0, 30, {
-    size: 44,
-    weight: 600,
-    align: 'center',
-    color: 'rgba(221,97,28,0.6)',
-    spacing: 6
-  });
-  ctx.restore();
-  return c;
-}
-
-function texWall(rng) {
-  const { c, ctx } = mkCanvas(1024, 512, '#2c3034');
-  for (let i = 0; i < 32; i++) {
-    ctx.fillStyle = i % 2 ? 'rgba(58,64,70,0.55)' : 'rgba(34,38,42,0.55)';
-    ctx.fillRect(i * 32, 0, 26, 512);
-  }
-  ctx.fillStyle = 'rgba(20,23,26,0.8)';
-  ctx.fillRect(0, 0, 1024, 14);
-  ctx.fillRect(0, 498, 1024, 14);
-  for (let i = 0; i < 200; i++) {
-    ctx.fillStyle = `rgba(90,96,102,${0.03 + rng() * 0.05})`;
-    ctx.fillRect(rng() * 1024, rng() * 512, 3 + rng() * 18, 2 + rng() * 5);
-  }
-  techText(ctx, 'BAY 3 · SEA RESCUE', 40, 120, {
-    size: 58,
-    color: 'rgba(150,158,166,0.45)',
-    spacing: 8
-  });
-  return c;
-}
-
-function texSky() {
-  const { c, ctx } = mkCanvas(1024, 512);
-  const g = ctx.createLinearGradient(0, 0, 0, 512);
-  g.addColorStop(0, '#0a1424');
-  g.addColorStop(0.42, '#22364f');
-  g.addColorStop(0.66, '#4b5f74');
-  g.addColorStop(0.82, '#9a6f4b');
-  g.addColorStop(0.92, '#c8834a');
-  g.addColorStop(1, '#141d26');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, 1024, 512);
-  const glow = ctx.createRadialGradient(700, 420, 10, 700, 420, 300);
-  glow.addColorStop(0, 'rgba(255,196,128,0.55)');
-  glow.addColorStop(1, 'rgba(255,196,128,0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, 1024, 512);
-  return c;
-}
-
-function texWater(rng) {
-  const { c, ctx } = mkCanvas(512, 512, '#12212c');
-  for (let i = 0; i < 900; i++) {
-    const y = rng() * 512;
-    const w = 10 + rng() * 90;
-    const a = 0.02 + rng() * 0.07 * (1 - y / 512);
-    ctx.fillStyle = `rgba(${150 + Math.floor(rng() * 60)},160,150,${a})`;
-    ctx.fillRect(rng() * 512, y, w, 1 + rng() * 2);
-  }
-  return c;
-}
-
-/* ------------------------------------------------------------------ *
- * Material library
- * ------------------------------------------------------------------ */
-
-export function createMaterials(renderer) {
-  const rng = makeRng(SEED_STRING + '/materials');
-  const aniso = renderer.capabilities ? renderer.capabilities.getMaxAnisotropy() : 1;
-  const textures = [];
-
-  const wrapTex = (canvas, o = {}) => {
-    const t = new THREE.CanvasTexture(canvas);
-    t.colorSpace = o.data ? THREE.NoColorSpace : THREE.SRGBColorSpace;
-    t.anisotropy = aniso;
-    if (o.repeat) {
-      t.wrapS = t.wrapT = THREE.RepeatWrapping;
-      t.repeat.set(o.repeat[0], o.repeat[1]);
-    }
-    t.minFilter = THREE.LinearMipmapLinearFilter;
     t.needsUpdate = true;
-    textures.push(t);
+    this.textures.push(t);
     return t;
-  };
-
-  const skyTex = wrapTex(texSky());
-  skyTex.mapping = THREE.EquirectangularReflectionMapping;
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
-  const env = pmrem.fromEquirectangular(skyTex).texture;
-  pmrem.dispose();
-
-  const T = {
-    sky: skyTex,
-    rough: wrapTex(texPaintRough(rng), { data: true, repeat: [3, 3] }),
-    wear: wrapTex(texWear(rng)),
-    wordmark: wrapTex(texWordmark()),
-    chevron: wrapTex(texChevron()),
-    caution: wrapTex(texCaution()),
-    doorArrow: wrapTex(texDoorArrow()),
-    nacelleWarn: wrapTex(texNacelleWarn()),
-    labelNoStep: wrapTex(texLabel(['NO STEP', 'PANEL S-7'])),
-    labelLift: wrapTex(texLabel(['LIFT POINT', 'RATED 2.4 t'], { plate: true, color: PALETTE.ivory })),
-    labelSvc: wrapTex(texLabel(['SVC ACCESS', 'HYD A3 · 190 bar'], { plate: true, color: PALETTE.ivory })),
-    labelPitot: wrapTex(texLabel(['DO NOT COVER', 'PROBE HEAT'], { plate: true, color: PALETTE.amber })),
-    panelId: wrapTex(texLabel(['P-14', 'HX-9 STA 4.2'])),
-    disc: wrapTex(texDisc()),
-    hotspot: wrapTex(texHotspot()),
-    floor: wrapTex(texFloor(rng), { repeat: [5, 5] }),
-    pad: wrapTex(texPad()),
-    wall: wrapTex(texWall(rng), { repeat: [4, 1] }),
-    water: wrapTex(texWater(rng), { repeat: [3, 1] })
-  };
-
-  const mats = {};
-  const reg = (name, m) => {
-    m.name = name;
-    mats[name] = m;
-    return m;
-  };
-
-  const Std = THREE.MeshStandardMaterial;
-  const Phys = THREE.MeshPhysicalMaterial;
-
-  reg('paintIvory', new Std({
-    color: 0xd9d4c6, roughness: 0.62, metalness: 0.08, roughnessMap: T.rough, envMapIntensity: 1.0
-  }));
-  reg('paintOrange', new Std({
-    color: 0xc2521a, roughness: 0.55, metalness: 0.08, roughnessMap: T.rough, envMapIntensity: 1.0
-  }));
-  reg('paintGraphite', new Std({
-    color: 0x24282d, roughness: 0.62, metalness: 0.24, roughnessMap: T.rough, envMapIntensity: 1.1
-  }));
-  reg('metalBare', new Std({ color: 0x8f969d, roughness: 0.34, metalness: 0.95, envMapIntensity: 1.2 }));
-  reg('metalDark', new Std({ color: 0x33383d, roughness: 0.44, metalness: 0.86, envMapIntensity: 1.1 }));
-  reg('mech', new Std({ color: 0x1b1e21, roughness: 0.52, metalness: 0.7, envMapIntensity: 0.9 }));
-  reg('rubber', new Std({ color: 0x13151a, roughness: 0.94, metalness: 0.02 }));
-  reg('fabric', new Std({ color: 0x38414d, roughness: 0.95, metalness: 0.0 }));
-  reg('fabricWarm', new Std({ color: 0x6d5442, roughness: 0.94, metalness: 0.0 }));
-  reg('cavity', new Std({ color: 0x0a0c0e, roughness: 1.0, metalness: 0.1, side: THREE.BackSide }));
-  reg('interior', new Std({ color: 0x2a2f34, roughness: 0.8, metalness: 0.15, side: THREE.DoubleSide }));
-  reg('glass', new Phys({
-    color: 0x9dc0cc, roughness: 0.06, metalness: 0.0, transparent: true, opacity: 0.36,
-    side: THREE.DoubleSide, depthWrite: false, ior: 1.46, envMapIntensity: 1.6,
-    clearcoat: 1.0, clearcoatRoughness: 0.04
-  }));
-  reg('lens', new Phys({
-    color: 0x0a1216, roughness: 0.05, metalness: 0.2, clearcoat: 1.0, envMapIntensity: 1.8
-  }));
-
-  const emissive = (name, color, intensity, base) =>
-    reg(name, new Std({
-      color: base != null ? base : 0x05080a, emissive: color, emissiveIntensity: intensity,
-      roughness: 0.4, metalness: 0.0, toneMapped: true
-    }));
-  emissive('emCyan', 0x53d8f0, 1.5);
-  emissive('emStatus', 0x8ff0c2, 1.2);
-  emissive('emRed', 0xff2f3a, 1.6);
-  emissive('emGreen', 0x2fff86, 1.6);
-  emissive('emStrobe', 0xffffff, 1.4);
-  emissive('emBeacon', 0xff3b2a, 1.4);
-  emissive('emCabin', 0xffd9a8, 1.0, 0x2a241d);
-  emissive('emPanel', 0x6fe0ff, 1.1, 0x08131a);
-  emissive('emExhaust', 0xff7a3c, 0.35, 0x1a0f0a);
-
-  // Blade material fades toward a motion disc at speed.
-  reg('blade', new Std({
-    color: 0x2b3035, roughness: 0.5, metalness: 0.35, roughnessMap: T.rough,
-    transparent: true, opacity: 1.0
-  }));
-  reg('disc', new Std({
-    map: T.disc, transparent: true, opacity: 0.0, roughness: 0.9, metalness: 0.0,
-    side: THREE.DoubleSide, depthWrite: false
-  }));
-
-  const decal = (name, map, o = {}) =>
-    reg(name, new Std({
-      map, transparent: true, roughness: 0.55, metalness: 0.05, roughnessMap: T.rough,
-      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
-      depthWrite: false, opacity: o.opacity == null ? 1 : o.opacity, side: THREE.FrontSide
-    }));
-  decal('decalWordmark', T.wordmark);
-  decal('decalChevron', T.chevron);
-  decal('decalCaution', T.caution);
-  decal('decalDoor', T.doorArrow);
-  decal('decalNoStep', T.labelNoStep);
-  decal('decalLift', T.labelLift);
-  decal('decalSvc', T.labelSvc);
-  decal('decalPitot', T.labelPitot);
-  decal('decalPanelId', T.panelId);
-  decal('decalWear', T.wear, { opacity: 0.85 });
-  reg('decalNacelle', new Std({
-    map: T.nacelleWarn, roughness: 0.6, metalness: 0.1, transparent: true,
-    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3, depthWrite: false
-  }));
-
-  // scene / hangar
-  reg('floor', new Std({ color: 0x9a9a9a, map: T.floor, roughness: 0.78, metalness: 0.1, envMapIntensity: 0.5 }));
-  reg('pad', new Std({
-    map: T.pad, transparent: true, roughness: 0.85, metalness: 0.05,
-    polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6, depthWrite: false
-  }));
-  reg('wall', new Std({ color: 0x8d949a, map: T.wall, roughness: 0.7, metalness: 0.35, envMapIntensity: 0.5 }));
-  reg('beam', new Std({ color: 0x353a40, roughness: 0.6, metalness: 0.5, envMapIntensity: 0.5 }));
-  reg('prop', new Std({ color: 0x4a4f55, roughness: 0.72, metalness: 0.3 }));
-  reg('propOrange', new Std({ color: 0x8d4718, roughness: 0.7, metalness: 0.15 }));
-  reg('water', new Std({
-    color: 0x22323d, map: T.water, roughness: 0.16, metalness: 0.5, envMapIntensity: 1.4
-  }));
-  reg('sky', new THREE.MeshBasicMaterial({ map: T.sky, toneMapped: true, side: THREE.DoubleSide }));
-  reg('hotspot', new THREE.SpriteMaterial({
-    map: T.hotspot, transparent: true, depthTest: true, depthWrite: false, opacity: 0.95
-  }));
-
-  for (const key of Object.keys(mats)) {
-    const m = mats[key];
-    if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) m.envMap = env;
   }
 
-  const dispose = () => {
-    for (const t of textures) t.dispose();
-    for (const key of Object.keys(mats)) mats[key].dispose();
-    env.dispose();
-  };
+  _reg(name, material) {
+    material.name = name;
+    this.materials.push(material);
+    this.mats[name] = material;
+    return material;
+  }
 
-  return { mats, textures: T, env, dispose, aniso, rngSeed: SEED_STRING };
+  /* ---------------- textures ---------------- */
+
+  _buildTextures() {
+    const rng = this.rng;
+    const T = this.tex;
+
+    /* Painted-composite micro roughness: gentle panel break-up, never dirty. */
+    {
+      const { c, ctx } = canvas2d(512, 512);
+      ctx.fillStyle = '#7c7c7c';
+      ctx.fillRect(0, 0, 512, 512);
+      blotches(ctx, rng, 90, 512, 512, 70, 'rgba(255,255,255,0.10)');
+      blotches(ctx, rng, 70, 512, 512, 44, 'rgba(0,0,0,0.10)');
+      for (let i = 0; i < 26; i++) {
+        const y = Math.floor(rng() * 512);
+        hairline(ctx, 0, y, 512, y, 1, 'rgba(0,0,0,0.06)');
+      }
+      T.paintRough = this._track(new THREE.CanvasTexture(c), false, 3, 3);
+    }
+
+    /* Brushed metal roughness. */
+    {
+      const { c, ctx } = canvas2d(512, 512);
+      ctx.fillStyle = '#5a5a5a';
+      ctx.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 900; i++) {
+        const y = rng() * 512;
+        const l = 60 + rng() * 300;
+        const x = rng() * 512;
+        hairline(ctx, x, y, x + l, y + (rng() - 0.5) * 2, 0.8,
+          rng() > 0.5 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)');
+      }
+      T.metalRough = this._track(new THREE.CanvasTexture(c), false, 2, 2);
+    }
+
+    /* Fuselage side placard: original wordmark + rescue block. */
+    {
+      const { c, ctx } = canvas2d(1024, 256);
+      ctx.clearRect(0, 0, 1024, 256);
+      stencilText(ctx, 'ASTERION', 26, 78, 62, '#20252b', 12, 500);
+      ctx.fillStyle = '#ef5f16';
+      ctx.fillRect(26, 116, 470, 7);
+      stencilText(ctx, 'HX-9', 30, 176, 92, '#ef5f16', 6, 800);
+      stencilText(ctx, 'AMPHIBIOUS RESCUE TILTROTOR', 250, 156, 22, '#2a3138', 3, 600);
+      stencilText(ctx, 'SERIAL HX9-0007 · COASTAL WING 4', 250, 196, 17, '#4a5560', 2, 500);
+      /* small original geometric mark: three stacked chevrons in a ring */
+      ctx.save();
+      ctx.translate(880, 128);
+      ctx.strokeStyle = '#20252b';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.arc(0, 0, 74, 0, TAU);
+      ctx.stroke();
+      ctx.strokeStyle = '#ef5f16';
+      ctx.lineWidth = 13;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-40, 20 - i * 30);
+        ctx.lineTo(0, -12 - i * 30 + 22);
+        ctx.lineTo(40, 20 - i * 30);
+        ctx.stroke();
+      }
+      ctx.restore();
+      T.wordmark = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Rescue chevron band for the tail and door. */
+    {
+      const { c, ctx } = canvas2d(512, 128);
+      ctx.clearRect(0, 0, 512, 128);
+      ctx.fillStyle = '#ef5f16';
+      for (let i = -1; i < 7; i++) {
+        const x = i * 76;
+        ctx.beginPath();
+        ctx.moveTo(x, 128);
+        ctx.lineTo(x + 44, 0);
+        ctx.lineTo(x + 76, 0);
+        ctx.lineTo(x + 32, 128);
+        ctx.closePath();
+        ctx.fill();
+      }
+      T.chevrons = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Nacelle caution wrap. */
+    {
+      const { c, ctx } = canvas2d(1024, 128);
+      ctx.clearRect(0, 0, 1024, 128);
+      hazardBand(ctx, 0, 0, 1024, 44, 22, '#f2a33c', '#20252b');
+      hazardBand(ctx, 0, 96, 1024, 32, 22, '#f2a33c', '#20252b');
+      ctx.fillStyle = 'rgba(20,24,28,0.86)';
+      ctx.fillRect(0, 46, 1024, 48);
+      stencilText(ctx, 'CAUTION · PROPROTOR ARC · KEEP CLEAR WHEN LIT', 24, 70, 24, '#ffd9a8', 3, 700);
+      stencilText(ctx, 'DUCT INTAKE · FOD SCREEN CHECK BEFORE START', 560, 70, 18, '#9fb0bb', 2, 500);
+      T.nacelleWarn = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Rescue door graphics: arrow, latch instruction, load placard. */
+    {
+      const { c, ctx } = canvas2d(512, 512);
+      ctx.clearRect(0, 0, 512, 512);
+      hazardBand(ctx, 0, 470, 512, 42, 18, '#ef5f16', '#f0ebe0');
+      ctx.save();
+      ctx.strokeStyle = '#20252b';
+      ctx.lineWidth = 16;
+      ctx.beginPath();
+      ctx.moveTo(392, 96);
+      ctx.lineTo(120, 96);
+      ctx.stroke();
+      ctx.fillStyle = '#20252b';
+      ctx.beginPath();
+      ctx.moveTo(96, 96);
+      ctx.lineTo(150, 62);
+      ctx.lineTo(150, 130);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      stencilText(ctx, 'RESCUE DOOR', 96, 168, 40, '#20252b', 5, 700);
+      stencilText(ctx, 'SLIDE AFT TO OPEN', 100, 212, 22, '#3c454e', 3, 600);
+      stencilText(ctx, 'HOIST STATION · 272 kg', 100, 268, 20, '#c2410a', 2, 700);
+      stencilText(ctx, 'DO NOT OPEN ABOVE 90 kt', 100, 300, 17, '#4a5560', 2, 500);
+      ctx.strokeStyle = 'rgba(32,37,43,0.6)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(88, 40, 336, 300);
+      T.doorDecal = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Maintenance label sheet (port aft) + panel identifiers. */
+    {
+      const { c, ctx } = canvas2d(512, 512);
+      ctx.clearRect(0, 0, 512, 512);
+      const rows = [
+        ['SVC-A2', 'HYDRAULIC ACCESS · 210 bar'],
+        ['SVC-B1', 'TILT ACTUATOR GREASE POINT'],
+        ['SVC-C4', 'BILGE DRAIN · CHECK AFTER WATER OPS'],
+        ['GND-01', 'BONDING POINT BEFORE FUELLING'],
+        ['NO STEP', 'COMPOSITE SKIN · WALK ON RAILS ONLY'],
+        ['P-14/L', 'PANEL SET 14 PORT · 26 FASTENERS']
+      ];
+      rows.forEach((r, i) => {
+        const y = 44 + i * 80;
+        ctx.fillStyle = 'rgba(240,236,228,0.9)';
+        ctx.fillRect(24, y - 26, 464, 60);
+        ctx.fillStyle = '#ef5f16';
+        ctx.fillRect(24, y - 26, 8, 60);
+        stencilText(ctx, r[0], 46, y - 6, 26, '#20252b', 2, 700);
+        stencilText(ctx, r[1], 46, y + 20, 15, '#49525b', 1, 500);
+      });
+      T.labels = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Asymmetric operational wear (starboard lower hull only). */
+    {
+      const { c, ctx } = canvas2d(512, 256);
+      ctx.clearRect(0, 0, 512, 256);
+      blotches(ctx, rng, 26, 512, 256, 58, 'rgba(74,84,92,0.20)');
+      blotches(ctx, rng, 14, 512, 256, 30, 'rgba(120,104,84,0.16)');
+      for (let i = 0; i < 22; i++) {
+        const x = rng() * 512;
+        const y = 90 + rng() * 150;
+        hairline(ctx, x, y, x + 20 + rng() * 60, y + (rng() - 0.5) * 8, 1 + rng(), 'rgba(60,68,74,0.18)');
+      }
+      T.wear = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Rotor motion disc: soft radial banding, additive. */
+    {
+      const { c, ctx } = canvas2d(512, 512);
+      const g = ctx.createRadialGradient(256, 256, 40, 256, 256, 256);
+      g.addColorStop(0.0, 'rgba(150,170,180,0.00)');
+      g.addColorStop(0.55, 'rgba(160,180,190,0.10)');
+      g.addColorStop(0.88, 'rgba(190,205,214,0.22)');
+      g.addColorStop(0.97, 'rgba(226,236,240,0.34)');
+      g.addColorStop(1.0, 'rgba(226,236,240,0.0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 512, 512);
+      ctx.strokeStyle = 'rgba(239,95,22,0.5)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(256, 256, 240, 0, TAU);
+      ctx.stroke();
+      T.motionDisc = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Hangar deck: segmented slabs, joints, pad ring and original pad mark. */
+    {
+      const { c, ctx } = canvas2d(1024, 1024);
+      ctx.fillStyle = '#3a3f45';
+      ctx.fillRect(0, 0, 1024, 1024);
+      blotches(ctx, rng, 120, 1024, 1024, 130, 'rgba(255,255,255,0.045)');
+      blotches(ctx, rng, 80, 1024, 1024, 90, 'rgba(0,0,0,0.06)');
+      ctx.strokeStyle = 'rgba(18,20,23,0.85)';
+      ctx.lineWidth = 6;
+      for (let i = 0; i <= 4; i++) {
+        const p = (i / 4) * 1024;
+        hairline(ctx, p, 0, p, 1024, 6, 'rgba(18,20,23,0.8)');
+        hairline(ctx, 0, p, 1024, p, 6, 'rgba(18,20,23,0.8)');
+      }
+      for (let i = 0; i < 60; i++) {
+        const x = rng() * 1024;
+        const y = rng() * 1024;
+        hairline(ctx, x, y, x + 30 + rng() * 90, y + (rng() - 0.5) * 6, 1.2, 'rgba(0,0,0,0.10)');
+      }
+      /* landing pad: dashed ring + original triple-chevron mark + designator */
+      ctx.save();
+      ctx.translate(512, 512);
+      ctx.setLineDash([34, 22]);
+      ctx.strokeStyle = 'rgba(240,236,228,0.62)';
+      ctx.lineWidth = 12;
+      ctx.beginPath();
+      ctx.arc(0, 0, 404, 0, TAU);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(239,95,22,0.55)';
+      ctx.lineWidth = 16;
+      ctx.beginPath();
+      ctx.arc(0, 0, 336, 0, TAU);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(240,236,228,0.5)';
+      ctx.lineWidth = 20;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-120, 40 + i * 70);
+        ctx.lineTo(0, -40 + i * 70);
+        ctx.lineTo(120, 40 + i * 70);
+        ctx.stroke();
+      }
+      ctx.restore();
+      stencilText(ctx, 'PAD 04 · RESCUE', 372, 856, 40, 'rgba(240,236,228,0.45)', 5, 700);
+      T.deck = this._track(new THREE.CanvasTexture(c), true, 1, 1);
+    }
+
+    /* Rear service wall panels. */
+    {
+      const { c, ctx } = canvas2d(1024, 512);
+      ctx.fillStyle = '#4a5158';
+      ctx.fillRect(0, 0, 1024, 512);
+      for (let i = 0; i < 16; i++) {
+        const x = i * 64;
+        ctx.fillStyle = i % 2 ? 'rgba(255,255,255,0.028)' : 'rgba(0,0,0,0.05)';
+        ctx.fillRect(x, 0, 64, 512);
+        hairline(ctx, x, 0, x, 512, 3, 'rgba(16,18,21,0.55)');
+      }
+      hairline(ctx, 0, 122, 1024, 122, 5, 'rgba(16,18,21,0.5)');
+      hairline(ctx, 0, 372, 1024, 372, 5, 'rgba(16,18,21,0.5)');
+      hazardBand(ctx, 0, 470, 1024, 42, 26, '#c9a24a', '#2a2e33');
+      blotches(ctx, rng, 60, 1024, 512, 120, 'rgba(0,0,0,0.05)');
+      stencilText(ctx, 'BAY 4 · TILTROTOR SERVICE', 40, 200, 44, 'rgba(226,232,236,0.30)', 6, 700);
+      T.wall = this._track(new THREE.CanvasTexture(c), true, 2, 1);
+    }
+
+    /* Exterior opening: dusk sky over water. */
+    {
+      const { c, ctx } = canvas2d(1024, 512);
+      const g = ctx.createLinearGradient(0, 0, 0, 512);
+      g.addColorStop(0.0, '#16273a');
+      g.addColorStop(0.34, '#3d5670');
+      g.addColorStop(0.52, '#8c7a72');
+      g.addColorStop(0.6, '#d78a4c');
+      g.addColorStop(0.63, '#5d6f7d');
+      g.addColorStop(1.0, '#1b2b36');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 1024, 512);
+      /* horizon haze + water glitter, seeded */
+      ctx.fillStyle = 'rgba(255,196,140,0.16)';
+      ctx.fillRect(0, 316, 1024, 10);
+      for (let i = 0; i < 420; i++) {
+        const y = 330 + Math.pow(rng(), 1.7) * 180;
+        const x = rng() * 1024;
+        const w = 4 + rng() * 26 * (y - 320) / 180;
+        ctx.fillStyle = `rgba(226,208,190,${0.05 + rng() * 0.16})`;
+        ctx.fillRect(x, y, w, 1.6);
+      }
+      for (let i = 0; i < 40; i++) {
+        const x = rng() * 1024;
+        const y = 40 + rng() * 220;
+        const r = 40 + rng() * 150;
+        const cg = ctx.createRadialGradient(x, y, 0, x, y, r);
+        cg.addColorStop(0, 'rgba(214,180,170,0.10)');
+        cg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = cg;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, TAU);
+        ctx.fill();
+      }
+      T.exterior = this._track(new THREE.CanvasTexture(c), true);
+    }
+
+    /* Equirectangular dusk environment source for PMREM. */
+    {
+      const { c, ctx } = canvas2d(512, 256);
+      const g = ctx.createLinearGradient(0, 0, 0, 256);
+      g.addColorStop(0.0, '#0d1620');
+      g.addColorStop(0.42, '#2f4356');
+      g.addColorStop(0.52, '#7d6a63');
+      g.addColorStop(0.56, '#b07a4f');
+      g.addColorStop(0.62, '#41505c');
+      g.addColorStop(1.0, '#141a1f');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 512, 256);
+      /* warm practical pools so metal has something to reflect */
+      for (let i = 0; i < 5; i++) {
+        const x = 40 + i * 96;
+        const rg = ctx.createRadialGradient(x, 176, 0, x, 176, 70);
+        rg.addColorStop(0, 'rgba(255,206,150,0.55)');
+        rg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = rg;
+        ctx.beginPath();
+        ctx.arc(x, 176, 70, 0, TAU);
+        ctx.fill();
+      }
+      T.envSource = this._track(new THREE.CanvasTexture(c), true);
+      T.envSource.mapping = THREE.EquirectangularReflectionMapping;
+    }
+
+    /* Interior fabric weave. */
+    {
+      const { c, ctx } = canvas2d(256, 256);
+      ctx.fillStyle = '#6d6d6d';
+      ctx.fillRect(0, 0, 256, 256);
+      for (let i = 0; i < 256; i += 4) {
+        hairline(ctx, i, 0, i, 256, 2, 'rgba(255,255,255,0.06)');
+        hairline(ctx, 0, i, 256, i, 2, 'rgba(0,0,0,0.07)');
+      }
+      blotches(ctx, rng, 30, 256, 256, 40, 'rgba(0,0,0,0.08)');
+      T.fabricRough = this._track(new THREE.CanvasTexture(c), false, 4, 4);
+    }
+  }
+
+  /* ---------------- materials ---------------- */
+
+  _buildMaterials() {
+    const T = this.tex;
+
+    const painted = (color, rough, extra) => new THREE.MeshPhysicalMaterial(Object.assign({
+      color,
+      roughness: rough,
+      metalness: 0.06,
+      roughnessMap: T.paintRough,
+      clearcoat: 0.34,
+      clearcoatRoughness: 0.42,
+      envMapIntensity: 0.85
+    }, extra || {}));
+
+    this._reg('paintIvory', painted(PALETTE.ivory, 0.44));
+    this._reg('paintIvoryLower', painted(PALETTE.ivoryShadow, 0.52));
+    this._reg('paintOrange', painted(PALETTE.orange, 0.4));
+    this._reg('paintOrangeDeep', painted(PALETTE.orangeDeep, 0.46));
+
+    this._reg('metal', new THREE.MeshStandardMaterial({
+      color: PALETTE.metal, metalness: 0.96, roughness: 0.32,
+      roughnessMap: T.metalRough, envMapIntensity: 1.0
+    }));
+    this._reg('metalWarm', new THREE.MeshStandardMaterial({
+      color: PALETTE.metalWarm, metalness: 0.9, roughness: 0.45,
+      roughnessMap: T.metalRough, envMapIntensity: 0.9
+    }));
+    this._reg('graphite', new THREE.MeshStandardMaterial({
+      color: PALETTE.graphite, metalness: 0.68, roughness: 0.52, envMapIntensity: 0.7
+    }));
+    this._reg('graphiteLight', new THREE.MeshStandardMaterial({
+      color: PALETTE.graphiteLight, metalness: 0.6, roughness: 0.6, envMapIntensity: 0.7
+    }));
+    this._reg('cavity', new THREE.MeshStandardMaterial({
+      color: 0x0a0c0e, metalness: 0.3, roughness: 0.95, envMapIntensity: 0.18
+    }));
+    this._reg('rubber', new THREE.MeshStandardMaterial({
+      color: PALETTE.rubber, metalness: 0.0, roughness: 0.94
+    }));
+    this._reg('fabric', new THREE.MeshStandardMaterial({
+      color: PALETTE.fabric, metalness: 0.0, roughness: 0.92, roughnessMap: T.fabricRough
+    }));
+    this._reg('lens', new THREE.MeshPhysicalMaterial({
+      color: PALETTE.lens, metalness: 0.15, roughness: 0.06,
+      clearcoat: 1.0, clearcoatRoughness: 0.04, envMapIntensity: 1.4
+    }));
+
+    this._reg('canopy', new THREE.MeshPhysicalMaterial({
+      color: PALETTE.glass, metalness: 0.0, roughness: 0.07,
+      transparent: true, opacity: 0.42, side: THREE.DoubleSide,
+      depthWrite: false, clearcoat: 1.0, clearcoatRoughness: 0.05,
+      envMapIntensity: 1.5
+    }));
+    this._reg('windowGlass', new THREE.MeshPhysicalMaterial({
+      color: 0x243239, metalness: 0.0, roughness: 0.1,
+      transparent: true, opacity: 0.5, depthWrite: false,
+      clearcoat: 1.0, envMapIntensity: 1.2
+    }));
+
+    const emissive = (color, intensity) => new THREE.MeshStandardMaterial({
+      color: 0x0b0f12, emissive: color, emissiveIntensity: intensity,
+      metalness: 0.2, roughness: 0.4, toneMapped: true
+    });
+    this._reg('emCyan', emissive(PALETTE.cyan, 1.5));
+    this._reg('emRed', emissive(PALETTE.red, 1.4));
+    this._reg('emGreen', emissive(PALETTE.green, 1.4));
+    this._reg('emWhite', emissive(0xf2f8ff, 1.6));
+    this._reg('emAmber', emissive(PALETTE.amber, 1.2));
+    this._reg('emCabin', emissive(0xffcf9a, 0.9));
+    this._reg('emPanel', emissive(0x63e2ff, 0.7));
+    this._reg('emExhaust', emissive(0xff7a3c, 0.0));
+
+    const decal = (map, opts) => new THREE.MeshStandardMaterial(Object.assign({
+      map, transparent: true, roughness: 0.5, metalness: 0.0,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+      depthWrite: false, envMapIntensity: 0.5
+    }, opts || {}));
+
+    this._reg('decalWordmark', decal(T.wordmark));
+    this._reg('decalChevrons', decal(T.chevrons));
+    this._reg('decalDoor', decal(T.doorDecal));
+    this._reg('decalLabels', decal(T.labels));
+    this._reg('decalWear', decal(T.wear, { opacity: 0.75 }));
+    this._reg('decalNacelle', decal(T.nacelleWarn, { side: THREE.DoubleSide }));
+
+    this._reg('motionDisc', new THREE.MeshBasicMaterial({
+      map: T.motionDisc, transparent: true, opacity: 0.0,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending
+    }));
+
+    /* environment */
+    this._reg('deck', new THREE.MeshStandardMaterial({
+      map: T.deck, color: 0xffffff, metalness: 0.06, roughness: 0.86
+    }));
+    this._reg('wall', new THREE.MeshStandardMaterial({
+      map: T.wall, metalness: 0.1, roughness: 0.82
+    }));
+    this._reg('structure', new THREE.MeshStandardMaterial({
+      color: 0x555c63, metalness: 0.55, roughness: 0.62
+    }));
+    this._reg('structureDark', new THREE.MeshStandardMaterial({
+      color: 0x2b3036, metalness: 0.4, roughness: 0.72
+    }));
+    this._reg('exterior', new THREE.MeshBasicMaterial({ map: T.exterior, toneMapped: true }));
+    this._reg('propPaint', new THREE.MeshStandardMaterial({
+      color: 0x4a5a63, metalness: 0.2, roughness: 0.7
+    }));
+    this._reg('propWarn', new THREE.MeshStandardMaterial({
+      color: 0xb9862f, metalness: 0.3, roughness: 0.6
+    }));
+    this._reg('hotspot', new THREE.MeshBasicMaterial({
+      color: PALETTE.cyan, transparent: true, opacity: 0.55, depthWrite: false
+    }));
+  }
+
+  /** Apply the generated PMREM environment to every material that wants it. */
+  applyEnvironment(envTexture) {
+    for (const m of this.materials) {
+      if ('envMap' in m && m.envMapIntensity !== undefined) m.envMap = envTexture;
+      m.needsUpdate = true;
+    }
+  }
+
+  dispose() {
+    for (const t of this.textures) t.dispose();
+    for (const m of this.materials) m.dispose();
+    this.textures.length = 0;
+    this.materials.length = 0;
+  }
 }
