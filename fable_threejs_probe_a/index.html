@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asterion HX-9 Amphibious Rescue Tiltrotor — Prototype Viewer</title>
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="view" aria-label="3D view of the Asterion HX-9 rescue tiltrotor"></canvas>
+
+<header id="topbar">
+  <h1>ASTERION <strong>HX-9</strong> <span class="sub">AMPHIBIOUS RESCUE TILTROTOR — PROTOTYPE 01</span></h1>
+  <div id="state-group" role="group" aria-label="Vehicle state">
+    <button type="button" data-state="ground" aria-pressed="true">1 Ground</button>
+    <button type="button" data-state="hover" aria-pressed="false">2 Hover</button>
+    <button type="button" data-state="transition" aria-pressed="false">3 Transition</button>
+    <button type="button" data-state="cruise" aria-pressed="false">4 Cruise</button>
+    <button type="button" data-state="rescue" aria-pressed="false">5 Rescue</button>
+    <button type="button" data-state="maintenance" aria-pressed="false">6 Maintenance</button>
+  </div>
+  <p id="transition-indicator" aria-live="polite">stable</p>
+</header>
+
+<aside id="panel-left" aria-label="Viewer controls">
+  <details open>
+    <summary>Camera</summary>
+    <div id="cam-group" role="group" aria-label="Camera presets">
+      <button type="button" data-cam="threequarter" aria-pressed="true">3/4</button>
+      <button type="button" data-cam="front" aria-pressed="false">Front</button>
+      <button type="button" data-cam="port" aria-pressed="false">Port</button>
+      <button type="button" data-cam="starboard" aria-pressed="false">Stbd Door</button>
+      <button type="button" data-cam="top" aria-pressed="false">Top</button>
+      <button type="button" data-cam="cockpit" aria-pressed="false">Cockpit</button>
+      <button type="button" data-cam="winch" aria-pressed="false">Winch</button>
+    </div>
+  </details>
+  <details open>
+    <summary>Lighting</summary>
+    <button type="button" id="lighting-toggle" aria-pressed="false">Mode: Dusk — switch to Night Inspection</button>
+  </details>
+  <details open>
+    <summary>Systems</summary>
+    <div class="row">
+      <label for="explode-slider">Exploded view</label>
+      <input type="range" id="explode-slider" min="0" max="100" value="0" step="1"
+             aria-describedby="explode-hint" disabled>
+      <output id="explode-value" for="explode-slider">0%</output>
+    </div>
+    <p id="explode-hint" class="hint">Available in Maintenance once rotors have stopped.</p>
+    <div class="row">
+      <label for="winch-cable">Winch cable</label>
+      <input type="range" id="winch-cable" min="0" max="100" value="0" step="1" disabled>
+      <output id="winch-value" for="winch-cable">0.0 m</output>
+    </div>
+    <p class="hint">Winch requires Rescue state with the cabin door open.</p>
+    <div class="row">
+      <input type="checkbox" id="sensor-auto" checked>
+      <label for="sensor-auto">Sensor auto-scan</label>
+    </div>
+    <div class="row">
+      <label for="sensor-az">Sensor azimuth</label>
+      <input type="range" id="sensor-az" min="-60" max="60" value="0" step="1" disabled>
+    </div>
+    <div class="row">
+      <label for="sensor-el">Sensor elevation</label>
+      <input type="range" id="sensor-el" min="-45" max="10" value="-18" step="1" disabled>
+    </div>
+  </details>
+  <details open>
+    <summary>Playback</summary>
+    <div class="btnrow">
+      <button type="button" id="btn-pause" aria-pressed="false">Pause</button>
+      <button type="button" id="btn-reset">Reset</button>
+      <button type="button" id="btn-help" aria-haspopup="dialog">Help</button>
+    </div>
+    <div class="row">
+      <input type="checkbox" id="chk-reduced">
+      <label for="chk-reduced">Reduced motion</label>
+    </div>
+  </details>
+</aside>
+
+<aside id="panel-right" aria-label="Telemetry and inspection">
+  <details open>
+    <summary>Telemetry</summary>
+    <dl id="telemetry">
+      <dt>State</dt><dd id="t-state">ground</dd>
+      <dt>Nacelle</dt><dd id="t-nacelle">0°</dd>
+      <dt>Rotor</dt><dd id="t-rpm">0 rpm</dd>
+      <dt>Gear</dt><dd id="t-gear">DOWN</dd>
+      <dt>Sponsons</dt><dd id="t-sponson">OUT</dd>
+      <dt>Cabin door</dt><dd id="t-door">CLOSED</dd>
+      <dt>Cable</dt><dd id="t-cable">0.0 m</dd>
+      <dt>Camera</dt><dd id="t-camera">threequarter</dd>
+      <dt>Draw calls</dt><dd id="t-calls">–</dd>
+      <dt>Triangles</dt><dd id="t-tris">–</dd>
+      <dt>FPS</dt><dd id="t-fps">–</dd>
+    </dl>
+  </details>
+  <details open>
+    <summary>Inspection</summary>
+    <label for="hotspot-select">Hotspot</label>
+    <select id="hotspot-select">
+      <option value="">— choose a component —</option>
+    </select>
+    <article id="hotspot-card" hidden aria-live="polite">
+      <h2 id="hotspot-title"></h2>
+      <p id="hotspot-body"></p>
+      <button type="button" id="hotspot-clear">Close</button>
+    </article>
+  </details>
+</aside>
+
+<dialog id="help-dialog" aria-labelledby="help-title">
+  <h2 id="help-title">HX-9 Viewer — keyboard shortcuts</h2>
+  <table>
+    <tbody>
+      <tr><th scope="row">1 – 6</th><td>Select state (ground, hover, transition, cruise, rescue, maintenance)</td></tr>
+      <tr><th scope="row">C</th><td>Cycle camera presets</td></tr>
+      <tr><th scope="row">L</th><td>Toggle dusk / night-inspection lighting</td></tr>
+      <tr><th scope="row">Space</th><td>Pause / resume animation</td></tr>
+      <tr><th scope="row">R</th><td>Deterministic reset</td></tr>
+      <tr><th scope="row">[ and ]</th><td>Exploded view − / + (maintenance only)</td></tr>
+      <tr><th scope="row">V</th><td>Winch cable down / up (rescue only)</td></tr>
+      <tr><th scope="row">M</th><td>Toggle reduced motion</td></tr>
+      <tr><th scope="row">H</th><td>Open this help</td></tr>
+      <tr><th scope="row">Esc</th><td>Close help / hotspot card</td></tr>
+    </tbody>
+  </table>
+  <p>Click a cyan marker on the aircraft (or use the Hotspot list) to inspect a component.
+     Diagnostics: <code>window.__HX9_PROBE__</code>.</p>
+  <button type="button" id="help-close" autofocus>Close</button>
+</dialog>
+
+<div id="error-panel" hidden role="alert">
+  <h2>HX-9 viewer failed to start</h2>
+  <pre id="error-text"></pre>
+  <p>Check that this page is served over HTTP, that the browser supports WebGL2,
+     and that the pinned Three.js CDN (cdn.jsdelivr.net) is reachable.</p>
+</div>
+
+<pre id="selftest" hidden></pre>
+
+<script>
+  window.__hx9Fatal = function (msg) {
+    var p = document.getElementById('error-panel');
+    var t = document.getElementById('error-text');
+    t.textContent = String(msg);
+    p.hidden = false;
+  };
+  window.addEventListener('error', function (e) {
+    if (!window.__HX9_READY__) window.__hx9Fatal(e.message || 'Unknown startup error');
+  });
+</script>
+<script type="module">
+  import('./src/main.js')
+    .then((m) => m.start())
+    .catch((err) => window.__hx9Fatal('Module load failed: ' + (err && err.message ? err.message : err)));
+</script>
+</body>
+</html>

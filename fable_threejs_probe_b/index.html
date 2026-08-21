@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asterion HX-9 — Amphibious Rescue Tiltrotor · Visualization</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <h1>ASTERION <span class="hx">HX&#8209;9</span> <small>Amphibious Rescue Tiltrotor — Prototype Visualization</small></h1>
+    <div id="state-controls" role="toolbar" aria-label="Vehicle state selector"></div>
+    <output id="transition-ind" aria-live="polite">—</output>
+  </header>
+
+  <main id="stage">
+    <div id="viewport" aria-label="3D viewer canvas"></div>
+
+    <aside id="panel" aria-label="Viewer controls">
+      <section>
+        <h2>Camera</h2>
+        <div id="camera-controls" role="toolbar" aria-label="Camera presets"></div>
+      </section>
+
+      <section>
+        <h2>Lighting</h2>
+        <label class="sr-only" for="light-mode">Lighting mode</label>
+        <select id="light-mode">
+          <option value="day">Dusk hangar</option>
+          <option value="night">Night inspection</option>
+        </select>
+      </section>
+
+      <section>
+        <h2>Exploded view</h2>
+        <label for="explode">Separation <output id="explode-val">0.00</output></label>
+        <input type="range" id="explode" min="0" max="1" step="0.01" value="0" disabled
+               aria-describedby="explode-note">
+        <p id="explode-note" class="note">Available in Maintenance with rotors stopped.</p>
+      </section>
+
+      <section>
+        <h2>Rescue winch</h2>
+        <div class="row">
+          <button id="winch-lower" type="button">Lower&nbsp;basket</button>
+          <button id="winch-raise" type="button">Raise&nbsp;basket</button>
+        </div>
+        <p class="note" id="winch-status">Winch locked — requires Rescue state, door open.</p>
+      </section>
+
+      <section>
+        <h2>Sensor turret</h2>
+        <label class="check"><input type="checkbox" id="sensor-auto" checked> Auto scan</label>
+        <label for="sensor-yaw">Yaw</label>
+        <input type="range" id="sensor-yaw" min="-1.2" max="1.2" step="0.01" value="0" disabled>
+        <label for="sensor-pitch">Pitch</label>
+        <input type="range" id="sensor-pitch" min="-0.9" max="0.15" step="0.01" value="-0.2" disabled>
+      </section>
+
+      <section>
+        <h2>Playback</h2>
+        <div class="row">
+          <button id="btn-pause" type="button" aria-pressed="false">Pause</button>
+          <button id="btn-reset" type="button">Reset</button>
+          <button id="btn-help" type="button">Help</button>
+        </div>
+        <label class="check"><input type="checkbox" id="reduced-motion"> Reduced motion</label>
+      </section>
+
+      <section>
+        <h2>Telemetry</h2>
+        <dl id="telemetry">
+          <div><dt>Nacelle tilt</dt><dd id="t-nacelle">—</dd></div>
+          <div><dt>Rotor RPM</dt><dd id="t-rpm">—</dd></div>
+          <div><dt>Gear</dt><dd id="t-gear">—</dd></div>
+          <div><dt>Sponsons</dt><dd id="t-sponson">—</dd></div>
+          <div><dt>Rescue door</dt><dd id="t-door">—</dd></div>
+          <div><dt>Cable out</dt><dd id="t-cable">—</dd></div>
+          <div><dt>Camera</dt><dd id="t-camera">—</dd></div>
+          <div><dt>Draw calls</dt><dd id="t-calls">—</dd></div>
+          <div><dt>Triangles</dt><dd id="t-tris">—</dd></div>
+          <div><dt>FPS</dt><dd id="t-fps">—</dd></div>
+        </dl>
+      </section>
+
+      <section>
+        <h2>Inspection points</h2>
+        <ul id="hotspot-list"></ul>
+      </section>
+    </aside>
+
+    <div id="hotspot-card" hidden role="region" aria-live="polite" aria-label="Component description">
+      <h3 id="card-title"></h3>
+      <p id="card-body"></p>
+      <button id="card-close" type="button">Close</button>
+    </div>
+  </main>
+</div>
+
+<dialog id="help-dialog" aria-label="Help and keyboard shortcuts">
+  <h2>HX-9 viewer help</h2>
+  <p>Drag to orbit, wheel to zoom, right-drag to pan. Click a cyan marker or use the
+     Inspection list to read about a component. States sequence the aircraft safely:
+     the winch needs Rescue, the exploded view needs Maintenance with rotors stopped.</p>
+  <table>
+    <caption>Keyboard shortcuts</caption>
+    <tbody>
+      <tr><th scope="row">1–6</th><td>Ground · Hover · Transition · Cruise · Rescue · Maintenance</td></tr>
+      <tr><th scope="row">C</th><td>Cycle camera presets</td></tr>
+      <tr><th scope="row">L</th><td>Toggle lighting mode</td></tr>
+      <tr><th scope="row">[ / ]</th><td>Exploded view − / + (Maintenance)</td></tr>
+      <tr><th scope="row">W / Q</th><td>Winch lower / raise (Rescue)</td></tr>
+      <tr><th scope="row">P or Space</th><td>Pause / resume</td></tr>
+      <tr><th scope="row">R</th><td>Deterministic reset</td></tr>
+      <tr><th scope="row">M</th><td>Toggle reduced motion</td></tr>
+      <tr><th scope="row">H or ?</th><td>Open this help</td></tr>
+      <tr><th scope="row">Esc / X</th><td>Close dialogs and cards</td></tr>
+    </tbody>
+  </table>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<div id="boot-error" hidden role="alert">
+  <h2 class="err-title"></h2>
+  <pre class="err-body"></pre>
+  <p>The HX-9 viewer needs WebGL and access to the pinned Three.js CDN modules.
+     Check the network connection, then reload the page.</p>
+</div>
+
+<pre id="selftest-out" hidden></pre>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+  const panel = document.getElementById('boot-error');
+  const showError = (title, err) => {
+    panel.hidden = false;
+    panel.querySelector('.err-title').textContent = title;
+    panel.querySelector('.err-body').textContent = String((err && err.stack) || err);
+  };
+  window.__HX9_BOOT_FAIL__ = showError;
+  try {
+    const m = await import('./src/main.js');
+    await m.boot();
+  } catch (err) {
+    console.error(err);
+    showError('HX-9 viewer failed to start', err);
+  }
+</script>
+</body>
+</html>

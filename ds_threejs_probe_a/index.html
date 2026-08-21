@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Asterion HX-9 Amphibious Rescue Tiltrotor — Prototype Viewer</title>
+    <meta name="description" content="Deterministic Three.js product visualisation of the fictional Asterion HX-9 amphibious rescue tiltrotor." />
+    <link rel="stylesheet" href="./styles.css" />
+    <!--
+      No static import map: the loader at the end of <body> probes the browser's
+      WebGL capability and the reachable pinned CDN, then injects the import map
+      before the first module load. three@0.169.0 needs WebGL2; browsers that
+      only expose WebGL1 get the pinned WebGL1-capable build three@0.160.1.
+    -->
+  </head>
+  <body>
+    <a class="skip" href="#controls">Skip to aircraft controls</a>
+
+    <canvas id="view" aria-label="Three-dimensional view of the Asterion HX-9 rescue tiltrotor in a coastal hangar. All status information is also available in the telemetry panel."></canvas>
+
+    <div id="boot" class="overlay" role="status">
+      <p class="mono">ASTERION HX-9 · PROTOTYPE VIEWER</p>
+      <p id="bootText" class="mono">initialising…</p>
+    </div>
+
+    <div id="errorPanel" class="overlay error" role="alert" hidden>
+      <h2 id="errorTitle">Viewer unavailable</h2>
+      <p id="errorText"></p>
+      <pre id="errorDetail" class="mono small" hidden></pre>
+      <p class="mono small">
+        Serve this folder over a local static HTTP server (for example
+        <code>python3 -m http.server 8123</code>) and open it in a desktop browser with WebGL enabled.
+        Paste <code>window.__HX9_DIAG__</code> from the console to report the exact failure stage.
+      </p>
+    </div>
+
+    <header id="topbar">
+      <h1><span class="brand">ASTERION</span> <strong>HX-9</strong> <span class="sub">Amphibious Rescue Tiltrotor</span></h1>
+      <p id="transitionIndicator" class="mono" role="status" data-busy="false">CONFIGURATION STEADY</p>
+    </header>
+
+    <aside id="controls" class="panel" aria-label="Aircraft controls">
+      <fieldset id="stateGroup">
+        <legend>Operating state</legend>
+        <div class="grid3">
+          <button type="button" data-state="ground" aria-pressed="true">Ground</button>
+          <button type="button" data-state="hover" aria-pressed="false">Hover</button>
+          <button type="button" data-state="transition" aria-pressed="false">Transition</button>
+          <button type="button" data-state="cruise" aria-pressed="false">Cruise</button>
+          <button type="button" data-state="rescue" aria-pressed="false">Rescue</button>
+          <button type="button" data-state="maintenance" aria-pressed="false">Maintenance</button>
+        </div>
+      </fieldset>
+
+      <fieldset id="camGroup">
+        <legend>Camera preset</legend>
+        <div class="grid3">
+          <button type="button" data-cam="hangar" aria-pressed="true">¾ view</button>
+          <button type="button" data-cam="front" aria-pressed="false">Front</button>
+          <button type="button" data-cam="port" aria-pressed="false">Port</button>
+          <button type="button" data-cam="starboard" aria-pressed="false">Rescue door</button>
+          <button type="button" data-cam="top" aria-pressed="false">Top</button>
+          <button type="button" data-cam="cockpit" aria-pressed="false">Cockpit</button>
+          <button type="button" data-cam="winch" aria-pressed="false">Winch</button>
+        </div>
+      </fieldset>
+
+      <fieldset id="lightGroup">
+        <legend>Lighting</legend>
+        <div class="grid2">
+          <button type="button" data-light="dusk" aria-pressed="true">Hangar dusk</button>
+          <button type="button" data-light="night" aria-pressed="false">Night inspection</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Exploded view</legend>
+        <label class="slider" for="explode">
+          <span>Separation <output id="explodeVal">0%</output></span>
+          <input id="explode" type="range" min="0" max="100" step="1" value="0" disabled aria-disabled="true" />
+        </label>
+        <p id="explodeHint" class="hint">Available in maintenance state only.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Rescue hoist</legend>
+        <div class="grid3">
+          <button type="button" id="winchToggle" aria-pressed="false" disabled>Boom</button>
+          <button type="button" id="cableDown" disabled>Lower ▼</button>
+          <button type="button" id="cableUp" disabled>Raise ▲</button>
+        </div>
+        <p id="winchHint" class="hint">Hoist enabled in rescue state only.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Sensor turret</legend>
+        <div class="grid3">
+          <button type="button" id="sensorScan" aria-pressed="true">Auto scan</button>
+          <button type="button" id="sensorLeft">Pan ◀</button>
+          <button type="button" id="sensorRight">Pan ▶</button>
+          <button type="button" id="sensorUp">Tilt ▲</button>
+          <button type="button" id="sensorDown">Tilt ▼</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>System</legend>
+        <div class="grid3">
+          <button type="button" id="pause" aria-pressed="false">Pause</button>
+          <button type="button" id="reset">Reset</button>
+          <button type="button" id="reducedMotion" aria-pressed="false">Reduced motion</button>
+          <button type="button" id="help" aria-haspopup="dialog">Help &amp; keys</button>
+        </div>
+      </fieldset>
+    </aside>
+
+    <aside id="sidebar" aria-label="Telemetry and inspection">
+      <section id="telemetry" class="panel">
+        <h2>Telemetry</h2>
+        <dl role="status">
+          <dt>State</dt><dd id="tState">ground</dd>
+          <dt>Nacelle angle</dt><dd id="tNacelle">90.0°</dd>
+          <dt>Rotor speed</dt><dd id="tRpm">0 rpm</dd>
+          <dt>Gear</dt><dd id="tGear">deployed</dd>
+          <dt>Sponsons</dt><dd id="tSponson">deployed</dd>
+          <dt>Rescue door</dt><dd id="tDoor">stowed</dd>
+          <dt>Cable out</dt><dd id="tCable">0.28 m</dd>
+          <dt>Turret yaw/pitch</dt><dd id="tTurret">0° / 6°</dd>
+          <dt>Camera</dt><dd id="tCam">three-quarter</dd>
+          <dt>Draw calls</dt><dd id="tCalls">0</dd>
+          <dt>Triangles</dt><dd id="tTris">0</dd>
+          <dt>FPS</dt><dd id="tFps">0</dd>
+        </dl>
+      </section>
+
+      <section id="inspection" class="panel">
+        <h2>Inspection hotspots</h2>
+        <p class="hint">Select a marker in the scene or a component below.</p>
+        <ul id="hotspotList"></ul>
+      </section>
+
+      <section id="hotspotCard" class="panel card" aria-live="polite" hidden>
+        <h2 id="hsTitle">Component</h2>
+        <p id="hsBody"></p>
+        <button type="button" id="hsClose">Dismiss</button>
+      </section>
+    </aside>
+
+    <dialog id="helpDialog" aria-labelledby="helpTitle">
+      <h2 id="helpTitle">HX-9 viewer — controls</h2>
+      <p>
+        Drag to orbit, scroll to zoom, right-drag to pan. Every state change is sequenced: gear doors open
+        before the gear extends, the hoist only runs through an open rescue door with the boom out, and the
+        exploded view is available only with the aircraft powered down in maintenance.
+      </p>
+      <table>
+        <caption>Keyboard shortcuts</caption>
+        <tbody id="shortcutTable"></tbody>
+      </table>
+      <button type="button" id="helpClose">Close</button>
+    </dialog>
+
+    <noscript>
+      <p class="mono">This viewer requires JavaScript modules and WebGL.</p>
+    </noscript>
+
+    <script>
+      /* Capability-aware loader: chooses a pinned three.js build and a reachable
+         CDN, then injects the import map before the first module load. Every
+         failure path writes a specific, readable message into the error panel. */
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var VER_WEBGL2 = '0.169.0';
+        var VER_WEBGL1 = '0.160.1';
+        var diag = (window.__HX9_DIAG__ = {
+          stage: 'loader', webgl: null, gpu: null, version: null, cdn: null, tried: [], messages: []
+        });
+        var shown = false;
+        function el(id) { return document.getElementById(id); }
+        function note(text) {
+          diag.stage = text;
+          var b = el('bootText');
+          if (b) b.textContent = text;
+        }
+        function fail(title, msg, detail) {
+          diag.messages.push(title + ' :: ' + msg + (detail ? ' :: ' + detail : ''));
+          if (window.console) console.error('[HX-9]', title, msg, detail || '');
+          if (shown) return;
+          shown = true;
+          var panel = el('errorPanel');
+          if (!panel) return;
+          el('errorTitle').textContent = title;
+          el('errorText').textContent = msg;
+          var d = el('errorDetail');
+          if (d && detail) { d.textContent = detail; d.hidden = false; }
+          panel.hidden = false;
+          var boot = el('boot');
+          if (boot) boot.hidden = true;
+        }
+        window.__HX9_FAIL__ = fail;
+
+        window.addEventListener('error', function (e) {
+          if (window.__HX9_BOOTED__) return;
+          var msg = e.message || (e.error && e.error.message) || 'unknown error';
+          fail('Start-up error', 'The viewer threw while starting. Stage: ' + diag.stage + ' — ' + msg,
+            (e.error && e.error.stack) || (e.filename ? e.filename + ':' + e.lineno : ''));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          if (window.__HX9_BOOTED__) return;
+          var r = e.reason || {};
+          fail('Start-up error', 'A promise rejected while starting. Stage: ' + diag.stage + ' — ' + (r.message || r), r.stack || '');
+        });
+
+        function readGpu(gl) {
+          try {
+            var ext = gl.getExtension('WEBGL_debug_renderer_info');
+            diag.gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.VERSION);
+          } catch (err) { diag.gpu = null; }
+        }
+        function webglProbe() {
+          try {
+            var c = document.createElement('canvas');
+            var gl2 = c.getContext('webgl2');
+            if (gl2) { diag.webgl = 2; readGpu(gl2); return 2; }
+            var gl1 = c.getContext('webgl') || c.getContext('experimental-webgl');
+            if (gl1) { diag.webgl = 1; readGpu(gl1); return 1; }
+          } catch (err) {
+            diag.messages.push('webgl probe threw: ' + err.message);
+          }
+          diag.webgl = 0;
+          return 0;
+        }
+
+        function probeBase(bases, version, done) {
+          if (typeof fetch !== 'function') {
+            diag.messages.push('fetch() unavailable; skipping CDN probe');
+            done(null);
+            return;
+          }
+          var i = 0;
+          function next() {
+            if (i >= bases.length) { done(null); return; }
+            var base = bases[i++].replace('{v}', version);
+            diag.tried.push(base);
+            var url = base + 'build/three.module.js';
+            fetch(url, { method: 'HEAD', mode: 'cors', cache: 'force-cache' })
+              .then(function (res) { if (res && res.ok) done(base); else next(); })
+              .catch(function () { next(); });
+          }
+          next();
+        }
+
+        function launch(base) {
+          diag.cdn = base;
+          var map = document.createElement('script');
+          map.type = 'importmap';
+          map.textContent = JSON.stringify({
+            imports: { three: base + 'build/three.module.js', 'three/addons/': base + 'examples/jsm/' }
+          });
+          document.head.appendChild(map);
+          note('loading modules from ' + base);
+          var s = document.createElement('script');
+          s.type = 'module';
+          s.src = './src/main.js';
+          s.addEventListener('error', function () {
+            fail('Module load failed',
+              'The browser could not load the viewer modules or resolve the pinned three.js build. ' +
+              'This machine may be offline or behind a proxy that blocks the CDN.',
+              'cdn: ' + base + '\ntried:\n' + diag.tried.join('\n'));
+          });
+          document.body.appendChild(s);
+          window.setTimeout(function () {
+            if (!window.__HX9_BOOTED__) {
+              fail('Start-up timed out',
+                'The viewer did not finish starting within 30 seconds. Stage: ' + diag.stage,
+                'webgl=' + diag.webgl + ' gpu=' + diag.gpu + ' version=' + diag.version + ' cdn=' + diag.cdn);
+            }
+          }, 30000);
+        }
+
+        var gl = webglProbe();
+        if (gl === 0) {
+          fail('WebGL unavailable',
+            'This browser did not provide a WebGL context, so the HX-9 model cannot be rendered. ' +
+            'Enable hardware acceleration / WebGL (chrome://gpu, or webgl.disabled=false in Firefox) or use another desktop browser.',
+            'webgl probe: none\nuserAgent: ' + navigator.userAgent);
+        } else {
+          diag.version = params.get('three') || (gl === 2 ? VER_WEBGL2 : VER_WEBGL1);
+          note('probing pinned three.js ' + diag.version + ' (webgl' + gl + ')');
+          var bases = params.get('cdn')
+            ? [params.get('cdn')]
+            : ['https://unpkg.com/three@{v}/', 'https://cdn.jsdelivr.net/npm/three@{v}/', 'https://fastly.jsdelivr.net/npm/three@{v}/'];
+          probeBase(bases, diag.version, function (base) {
+            if (!base) {
+              base = bases[0].replace('{v}', diag.version);
+              diag.messages.push('no CDN answered the probe; attempting ' + base + ' anyway');
+            }
+            launch(base);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
